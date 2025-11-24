@@ -23,7 +23,7 @@ setup(
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
@@ -35,8 +35,8 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "mobilenet-yolo-train=train:main",
-            "mobilenet-yolo-detect=detect:main",
+            "mobilenet-yolo-train=scripts.train:main",
+            "mobilenet-yolo-detect=scripts.detect:main",
         ],
     },
 )

@@ -10,8 +10,8 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from models import MobileNetYOLO
-from utils.visualize import visualize_detections
+from mobilenet_ssdlite.models import MobileNetYOLO
+from mobilenet_ssdlite.utils.visualize import visualize_detections
 
 
 def parse_args():

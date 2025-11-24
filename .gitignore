@@ -36,7 +36,9 @@ env/
 .ipynb_checkpoints
 
 # Data
-data/
+data/*
+!data/*.yaml
+!data/README.md
 datasets/
 *.jpg
 *.jpeg

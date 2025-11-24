@@ -10,10 +10,10 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from models import MobileNetYOLO
-from models.loss import YOLOLoss
-from utils import DetectionDataset, collate_fn, get_transforms
-from utils.visualize import plot_training_curves
+from mobilenet_ssdlite.models import MobileNetYOLO
+from mobilenet_ssdlite.models.loss import YOLOLoss
+from mobilenet_ssdlite.utils import DetectionDataset, YOLODataset, collate_fn, get_transforms
+from mobilenet_ssdlite.utils.visualize import plot_training_curves
 
 
 def parse_args():
@@ -158,19 +158,48 @@ def main():
     train_transforms = get_transforms(config, is_train=True)
     val_transforms = get_transforms(config, is_train=False)
 
-    train_dataset = DetectionDataset(
-        data_dir=config['data']['train'],
-        annotation_file=None,
-        transforms=train_transforms,
-        img_size=config['model']['input_size'][0]
-    )
+    # Check if using YOLO format (yaml file) or legacy format
+    data_config = config['data']
+    if 'yaml' in data_config:
+        # YOLO format with yaml config
+        yaml_path = data_config['yaml']
+        print(f"Using YOLO format dataset: {yaml_path}")
 
-    val_dataset = DetectionDataset(
-        data_dir=config['data']['val'],
-        annotation_file=None,
-        transforms=val_transforms,
-        img_size=config['model']['input_size'][0]
-    )
+        train_dataset = YOLODataset(
+            yaml_path=yaml_path,
+            split='train',
+            transforms=train_transforms,
+            img_size=config['model']['input_size'][0]
+        )
+
+        val_dataset = YOLODataset(
+            yaml_path=yaml_path,
+            split='val',
+            transforms=val_transforms,
+            img_size=config['model']['input_size'][0]
+        )
+
+        # Update num_classes from dataset if not specified
+        if config['model']['num_classes'] != train_dataset.num_classes:
+            print(f"Updating num_classes from {config['model']['num_classes']} to {train_dataset.num_classes}")
+            config['model']['num_classes'] = train_dataset.num_classes
+
+    else:
+        # Legacy format with separate directories
+        print("Using legacy format dataset")
+        train_dataset = DetectionDataset(
+            data_dir=config['data']['train'],
+            annotation_file=None,
+            transforms=train_transforms,
+            img_size=config['model']['input_size'][0]
+        )
+
+        val_dataset = DetectionDataset(
+            data_dir=config['data']['val'],
+            annotation_file=None,
+            transforms=val_transforms,
+            img_size=config['model']['input_size'][0]
+        )
 
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Val dataset size: {len(val_dataset)}")

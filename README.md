@@ -32,6 +32,39 @@ Post-processing (NMS)
 Final Detections
 ```
 
+## Project Structure
+
+```
+mobilenet-detection/
+├── configs/                    # Configuration files
+│   ├── default.yaml           # Legacy format config
+│   ├── yolo_format.yaml       # YOLO format config
+│   └── mobilenet_small.yaml
+├── mobilenet_ssdlite/         # Main package
+│   ├── __init__.py
+│   ├── models/                # Model architecture
+│   │   ├── __init__.py
+│   │   ├── mobilenet_yolo.py # Main model
+│   │   ├── backbone.py       # MobileNet backbone
+│   │   ├── detection_head.py # Detection head
+│   │   └── loss.py           # Loss functions
+│   └── utils/                 # Utilities
+│       ├── __init__.py
+│       ├── dataset.py        # Dataset classes (YOLO & COCO)
+│       ├── transforms.py     # Data augmentation
+│       └── visualize.py      # Visualization tools
+├── scripts/                   # Training and inference scripts
+│   ├── train.py              # Training script
+│   └── detect.py             # Inference script
+├── examples/                  # Usage examples
+│   └── basic_usage.py        # Basic usage example
+├── data/                      # Dataset directory
+│   └── dataset.yaml          # Example dataset config
+├── checkpoints/               # Model checkpoints (created during training)
+├── logs/                      # Training logs (created during training)
+└── setup.py                   # Package setup
+```
+
 ## Installation
 
 ### Requirements
@@ -53,7 +86,75 @@ pip install -r requirements.txt
 
 ## Quick Start
 
+### 0. Basic Usage Example
+
+To quickly test the model and understand the API:
+
+```bash
+python examples/basic_usage.py
+```
+
+This will:
+- Load the model configuration
+- Create a MobileNet-YOLO model
+- Run inference on a dummy image
+- Display model information
+
 ### 1. Prepare Your Dataset
+
+#### Option 1: YOLO Format (Recommended)
+
+Organize your dataset in the YOLO format:
+
+```
+your_dataset/
+├── images/
+│   ├── train/
+│   │   ├── img1.jpg
+│   │   ├── img2.jpg
+│   │   └── ...
+│   └── val/
+│       ├── img3.jpg
+│       └── ...
+├── labels/
+│   ├── train/
+│   │   ├── img1.txt
+│   │   ├── img2.txt
+│   │   └── ...
+│   └── val/
+│       ├── img3.txt
+│       └── ...
+└── dataset.yaml  # Dataset configuration
+```
+
+Create a `dataset.yaml` file describing your dataset:
+
+```yaml
+# Dataset root directory
+path: /path/to/your_dataset
+
+# Dataset splits
+train: images/train
+val: images/val
+test: images/test  # optional
+
+# Number of classes
+nc: 3
+
+# Class names
+names:
+  - class1
+  - class2
+  - class3
+```
+
+Each label file (`.txt`) contains one bounding box per line in the format:
+```
+class_id x_center y_center width height
+```
+where all coordinates are normalized to [0, 1].
+
+#### Option 2: Legacy Format
 
 Organize your dataset in the following structure:
 
@@ -70,21 +171,29 @@ data/
     └── annotations.json
 ```
 
-Or use COCO format annotations.
-
 ### 2. Configure Your Model
 
-Edit `configs/default.yaml` to customize:
+#### For YOLO Format Dataset
 
-- Model architecture (backbone, FPN channels, etc.)
-- Number of classes and class names
-- Training hyperparameters
-- Data augmentation settings
-- Anchor sizes for your dataset
+Use `configs/yolo_format.yaml` or create your own:
 
 ```yaml
 model:
   backbone: "mobilenetv3_large_100"  # or mobilenetv3_small_100
+  num_classes: 80  # Will be auto-detected from dataset.yaml
+  input_size: [640, 640]
+
+data:
+  yaml: "path/to/your/dataset.yaml"  # Point to your YOLO dataset config
+```
+
+#### For Legacy Format
+
+Edit `configs/default.yaml`:
+
+```yaml
+model:
+  backbone: "mobilenetv3_large_100"
   num_classes: 80
   input_size: [640, 640]
 
@@ -97,11 +206,14 @@ data:
 ### 3. Train the Model
 
 ```bash
-# Train from scratch
-python train.py --config configs/default.yaml --device cuda
+# Train with YOLO format dataset
+python scripts/train.py --config configs/yolo_format.yaml --device cuda
+
+# Train with legacy format
+python scripts/train.py --config configs/default.yaml --device cuda
 
 # Resume from checkpoint
-python train.py --config configs/default.yaml --resume checkpoints/checkpoint_epoch_50.pth
+python scripts/train.py --config configs/yolo_format.yaml --resume checkpoints/checkpoint_epoch_50.pth
 ```
 
 Training outputs:
@@ -113,27 +225,27 @@ Training outputs:
 
 ```bash
 # Detect objects in a single image
-python detect.py --config configs/default.yaml \
-                 --checkpoint checkpoints/best.pth \
-                 --source image.jpg \
-                 --output output/
+python scripts/detect.py --config configs/default.yaml \
+                         --checkpoint checkpoints/best.pth \
+                         --source image.jpg \
+                         --output output/
 
 # Process a directory of images
-python detect.py --config configs/default.yaml \
-                 --checkpoint checkpoints/best.pth \
-                 --source data/test/ \
-                 --output output/
+python scripts/detect.py --config configs/default.yaml \
+                         --checkpoint checkpoints/best.pth \
+                         --source data/test/ \
+                         --output output/
 
 # Process a video
-python detect.py --config configs/default.yaml \
-                 --checkpoint checkpoints/best.pth \
-                 --source video.mp4 \
-                 --output output/
+python scripts/detect.py --config configs/default.yaml \
+                         --checkpoint checkpoints/best.pth \
+                         --source video.mp4 \
+                         --output output/
 
 # Save detection results as text files
-python detect.py --checkpoint checkpoints/best.pth \
-                 --source image.jpg \
-                 --save-txt
+python scripts/detect.py --checkpoint checkpoints/best.pth \
+                          --source image.jpg \
+                          --save-txt
 ```
 
 ### 5. Monitor Training
@@ -253,7 +365,7 @@ python scripts/compute_anchors.py --data data/train --num-anchors 9
 
 ```python
 import torch
-from models import MobileNetYOLO
+from mobilenet_ssdlite.models import MobileNetYOLO
 
 # Load model
 model = MobileNetYOLO(config)
@@ -328,7 +440,7 @@ If you use this code in your research, please cite:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
