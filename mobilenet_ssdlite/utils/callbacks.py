@@ -161,18 +161,34 @@ class EarlyStopping:
         else:
             self.is_better = lambda a, best: a > best + self.min_delta
 
-    def step(self, metrics, lr_reduced=False, num_lr_reductions=0):
+    def step(self, metrics=None, lr_reduced=False, num_lr_reductions=0, improved=False):
         """
         检查是否应该停止训练
 
         Args:
-            metrics: 当前epoch的验证指标
+            metrics: 当前epoch的验证指标（可选，当 improved 参数提供时可以省略）
             lr_reduced: 本次是否降低了学习率（配合 check_lr_reductions）
             num_lr_reductions: 学习率降低总次数
+            improved: 是否有改善（外部判断，如 best 模型被更新）。
+                      如果为 True，计数器将被重置。这允许外部使用不同指标
+                      （如 mAP）来判断改善，而不仅仅依赖传入的 metrics。
 
         Returns:
             bool: 是否应该停止训练
         """
+        # 如果外部告知有改善，重置计数器
+        if improved:
+            self.counter = 0
+            if metrics is not None:
+                current = float(metrics)
+                if self.best is None or self.is_better(current, self.best):
+                    self.best = current
+            return self.should_stop
+
+        # 如果没有提供 metrics 且没有 improved，直接返回
+        if metrics is None:
+            return self.should_stop
+
         current = float(metrics)
 
         # 如果使用学习率降低次数来判断

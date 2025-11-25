@@ -554,12 +554,16 @@ def main():
 
         # 打印结果
         print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {val_metrics['val_loss']:.4f}")
+
+        # 判断是否有改善（用于早停）
+        is_improved = False
         if compute_metrics and 'mAP@0.5' in val_metrics:
             print(f"Metrics: mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
 
             # 保存最佳模型
             if val_metrics['mAP@0.5'] > best_map:
                 best_map = val_metrics['mAP@0.5']
+                is_improved = True  # best 模型更新，标记为有改善
                 torch.save({
                     'model': val_model.state_dict(),
                     'best_map': best_map,
@@ -575,8 +579,8 @@ def main():
             'args': vars(args)
         }, weights_dir / 'last.pt')
 
-        # 早停
-        if early_stopping.step(val_metrics['val_loss']):
+        # 早停：当 best 模型更新时重置计数器
+        if early_stopping.step(val_metrics['val_loss'], improved=is_improved):
             print("Early stopping triggered")
             break
 
