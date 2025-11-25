@@ -64,7 +64,6 @@ events.out.tfevents.*
 # Output
 output/
 results/
-*.txt
 
 # System
 .DS_Store
