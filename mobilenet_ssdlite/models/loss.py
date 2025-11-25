@@ -98,9 +98,9 @@ class YOLOLoss(nn.Module):
                     # Get assigned positions
                     anchor_idx = assigned_mask.nonzero(as_tuple=True)
 
-                    # Compute box targets (offsets)
+                    # Compute box targets (offsets) - pass current stride
                     box_target[batch_idx][anchor_idx] = self._compute_box_targets(
-                        assigned_targets, assigned_anchors
+                        assigned_targets, assigned_anchors, stride
                     )
 
                     # Objectness target
@@ -234,13 +234,14 @@ class YOLOLoss(nn.Module):
 
         return assigned_mask, assigned_anchors, assigned_targets, assigned_labels
 
-    def _compute_box_targets(self, gt_boxes, anchors):
+    def _compute_box_targets(self, gt_boxes, anchors, stride):
         """
         Compute box regression targets (offsets from anchors)
 
         Args:
             gt_boxes: [N, 4] target boxes (x1, y1, x2, y2)
             anchors: [N, 4] anchor boxes (cx, cy, w, h)
+            stride: Current feature map stride
 
         Returns:
             targets: [N, 4] regression targets (tx, ty, tw, th)
@@ -258,9 +259,9 @@ class YOLOLoss(nn.Module):
         anchor_h = anchors[:, 3]
 
         # Compute targets (inverse of decoding)
-        # tx, ty: normalized offset
-        tx = (gt_cx - anchor_cx) / self.strides[0]  # Approximate
-        ty = (gt_cy - anchor_cy) / self.strides[0]
+        # tx, ty: normalized offset using current stride
+        tx = (gt_cx - anchor_cx) / stride
+        ty = (gt_cy - anchor_cy) / stride
 
         # tw, th: log-space scaling
         tw = torch.log(gt_w / anchor_w + 1e-16)

@@ -311,23 +311,35 @@ class DetectionMetrics:
             # 计算IoU
             iou = box_iou_batch(target_boxes, pred_boxes)
 
-            # 匹配预测和GT
+            # 匹配预测和GT（贪婪匹配，确保每个GT只被匹配一次）
             correct = np.zeros((len(pred), len(iou_thresholds)), dtype=bool)
 
+            # 按置信度从高到低排序预测框
+            sort_idx = np.argsort(-pred_conf)
+
             for i, iou_thr in enumerate(iou_thresholds):
-                # 对每个预测框
-                for pred_idx in range(len(pred)):
-                    # 找到同类别的GT
-                    same_class = target_cls == pred_cls[pred_idx]
-                    if not same_class.any():
-                        continue
+                detected_gt = set()  # 记录已被匹配的GT索引
 
-                    # 找到IoU最大的GT
-                    iou_same_class = iou[:, pred_idx].copy()
-                    iou_same_class[~same_class] = 0
+                for pred_idx in sort_idx:
+                    p_cls = pred_cls[pred_idx]
 
-                    if iou_same_class.max() > iou_thr:
+                    # 找到同类别且未被匹配的GT中IoU最大的
+                    best_iou = 0
+                    best_gt_idx = -1
+
+                    for gt_idx, gt_cls in enumerate(target_cls):
+                        if gt_idx in detected_gt:
+                            continue
+                        if p_cls != gt_cls:
+                            continue
+                        current_iou = iou[gt_idx, pred_idx]
+                        if current_iou > iou_thr and current_iou > best_iou:
+                            best_iou = current_iou
+                            best_gt_idx = gt_idx
+
+                    if best_gt_idx >= 0:
                         correct[pred_idx, i] = True
+                        detected_gt.add(best_gt_idx)  # 标记该GT已被占用
 
             self.stats.append((correct, pred_conf, pred_cls, target_cls))
 
