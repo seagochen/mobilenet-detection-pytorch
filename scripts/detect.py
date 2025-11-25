@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from mobilenet_ssdlite.models import MobileNetYOLO
+from mobilenet_ssdlite.models import MobileNetDetector
 from mobilenet_ssdlite.utils.visualize import visualize_detections
 
 
@@ -257,7 +257,7 @@ def main():
 
     # Create model
     print("Loading model...")
-    model = MobileNetYOLO(config)
+    model = MobileNetDetector(config)
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)

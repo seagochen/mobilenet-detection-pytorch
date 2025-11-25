@@ -10,7 +10,7 @@ from .backbone import MobileNetBackbone, FeaturePyramidNetwork
 from .detection_head import DetectionHead, AnchorGenerator, YOLODecoder
 
 
-class MobileNetYOLO(nn.Module):
+class MobileNetDetector(nn.Module):
     """
     Complete MobileNet-YOLO object detection model
     """
@@ -201,7 +201,7 @@ if __name__ == '__main__':
         ]
     }
 
-    model = MobileNetYOLO(config)
+    model = MobileNetDetector(config)
     x = torch.randn(2, 3, 640, 640)
 
     # Test training mode

@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from mobilenet_ssdlite.models import MobileNetYOLO
+from mobilenet_ssdlite.models import MobileNetDetector
 from mobilenet_ssdlite.models.loss import YOLOLoss
 from mobilenet_ssdlite.utils import DetectionDataset, YOLODataset, collate_fn, get_transforms
 
@@ -490,7 +490,7 @@ def main():
         print(colorstr('bright_yellow', f'Using default anchors: {config["anchors"]}'))
 
     # 创建模型
-    model = MobileNetYOLO(config).to(device)
+    model = MobileNetDetector(config).to(device)
 
     # 打印模型信息
     total_params = sum(p.numel() for p in model.parameters())

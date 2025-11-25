@@ -276,10 +276,10 @@ Supported backbone families:
 
 ```python
 import torch
-from mobilenet_ssdlite.models import MobileNetYOLO
+from mobilenet_ssdlite.models import MobileNetDetector
 
 # Load model
-model = MobileNetYOLO(config)
+model = MobileNetDetector(config)
 checkpoint = torch.load('checkpoints/best.pth')
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
