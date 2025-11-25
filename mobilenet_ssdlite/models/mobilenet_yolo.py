@@ -4,6 +4,7 @@ Combines MobileNet backbone with YOLO-style detection head
 """
 import torch
 import torch.nn as nn
+import torchvision
 
 from .backbone import MobileNetBackbone, FeaturePyramidNetwork
 from .detection_head import DetectionHead, AnchorGenerator, YOLODecoder
@@ -121,7 +122,7 @@ class MobileNetYOLO(nn.Module):
 
     def predict(self, x, conf_thresh=0.25, nms_thresh=0.45):
         """
-        Make predictions with NMS post-processing
+        Make predictions with NMS post-processing (Optimized with torchvision.ops.nms)
 
         Args:
             x: Input images [B, 3, H, W]
@@ -135,23 +136,43 @@ class MobileNetYOLO(nn.Module):
         self.eval()
 
         with torch.no_grad():
+            # 1. 获取模型输出 (boxes: [B, N, 4], scores: [B, N], probs: [B, N, C])
             boxes, obj_scores, class_probs = self.forward(x)
 
-            # Compute final scores: objectness * class_prob
-            scores = obj_scores.unsqueeze(-1) * class_probs  # [B, N, num_classes]
-            max_scores, labels = scores.max(dim=-1)  # [B, N]
+            # 2. 计算最终分数: objectness * class_prob
+            # [B, N, num_classes]
+            scores = obj_scores.unsqueeze(-1) * class_probs
+
+            # 获取每个 anchor 最高分的类别
+            # max_scores: [B, N], labels: [B, N]
+            max_scores, labels = scores.max(dim=-1)
 
             batch_detections = []
 
             for i in range(boxes.size(0)):
-                # Filter by confidence
+                # 3. 阈值过滤
                 mask = max_scores[i] > conf_thresh
-                img_boxes = boxes[i][mask]
-                img_scores = max_scores[i][mask]
-                img_labels = labels[i][mask]
 
-                # Apply NMS
-                keep = self._nms(img_boxes, img_scores, nms_thresh)
+                if not mask.any():
+                    batch_detections.append({
+                        'boxes': torch.tensor([], device=boxes.device),
+                        'scores': torch.tensor([], device=boxes.device),
+                        'labels': torch.tensor([], device=boxes.device)
+                    })
+                    continue
+
+                img_boxes = boxes[i][mask]      # [M, 4]
+                img_scores = max_scores[i][mask]  # [M]
+                img_labels = labels[i][mask]     # [M]
+
+                # 4. 类别隔离 NMS (Class-agnostic NMS with offsets)
+                # 为避免不同类别的框相互抑制，给坐标加一个基于类别的偏移量
+                max_coordinate = img_boxes.max() + 5000
+                offsets = img_labels.float() * max_coordinate
+                boxes_for_nms = img_boxes + offsets[:, None]
+
+                # 5. 使用 torchvision 极速 NMS
+                keep = torchvision.ops.nms(boxes_for_nms, img_scores, nms_thresh)
 
                 batch_detections.append({
                     'boxes': img_boxes[keep],
@@ -160,71 +181,6 @@ class MobileNetYOLO(nn.Module):
                 })
 
             return batch_detections
-
-    @staticmethod
-    def _nms(boxes, scores, iou_threshold):
-        """
-        Non-Maximum Suppression
-
-        Args:
-            boxes: [N, 4] (x1, y1, x2, y2)
-            scores: [N]
-            iou_threshold: IoU threshold
-
-        Returns:
-            keep: Indices of boxes to keep
-        """
-        if boxes.numel() == 0:
-            return torch.empty((0,), dtype=torch.int64, device=boxes.device)
-
-        # Sort by score
-        _, order = scores.sort(descending=True)
-
-        keep = []
-        while order.numel() > 0:
-            if order.numel() == 1:
-                keep.append(order[0])
-                break
-
-            i = order[0]
-            keep.append(i)
-
-            # Compute IoU
-            iou = MobileNetYOLO._box_iou(boxes[i].unsqueeze(0), boxes[order[1:]])
-
-            # Keep boxes with IoU below threshold
-            mask = iou <= iou_threshold
-            order = order[1:][mask.squeeze()]
-
-        return torch.tensor(keep, dtype=torch.int64, device=boxes.device)
-
-    @staticmethod
-    def _box_iou(boxes1, boxes2):
-        """
-        Compute IoU between boxes
-
-        Args:
-            boxes1: [N, 4]
-            boxes2: [M, 4]
-
-        Returns:
-            iou: [N, M]
-        """
-        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-
-        # Intersection
-        lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N, M, 2]
-        rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N, M, 2]
-
-        wh = (rb - lt).clamp(min=0)  # [N, M, 2]
-        inter = wh[:, :, 0] * wh[:, :, 1]  # [N, M]
-
-        # Union
-        union = area1[:, None] + area2 - inter
-
-        iou = inter / union
-        return iou
 
 
 if __name__ == '__main__':
