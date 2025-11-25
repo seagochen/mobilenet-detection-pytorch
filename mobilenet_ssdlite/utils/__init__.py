@@ -10,6 +10,10 @@ from .callbacks import (
     LabelSmoothingLoss, LabelSmoothingBCE, WarmupScheduler
 )
 from .general import nms, box_iou, check_img_size, init_seeds, check_file, increment_path, colorstr
+from .anchors import (
+    get_or_compute_anchors, compute_anchors_for_dataset, kmeans_anchors,
+    save_anchors, load_anchors
+)
 
 __all__ = [
     # 数据集
@@ -22,5 +26,8 @@ __all__ = [
     'ReduceLROnPlateau', 'EarlyStopping', 'ModelEMA', 'GradientAccumulator',
     'LabelSmoothingLoss', 'LabelSmoothingBCE', 'WarmupScheduler',
     # 通用工具
-    'nms', 'box_iou', 'check_img_size', 'init_seeds', 'check_file', 'increment_path', 'colorstr'
+    'nms', 'box_iou', 'check_img_size', 'init_seeds', 'check_file', 'increment_path', 'colorstr',
+    # Anchor 工具
+    'get_or_compute_anchors', 'compute_anchors_for_dataset', 'kmeans_anchors',
+    'save_anchors', 'load_anchors'
 ]

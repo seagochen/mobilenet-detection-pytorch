@@ -30,6 +30,7 @@ from mobilenet_ssdlite.utils.callbacks import (
     ReduceLROnPlateau, EarlyStopping, ModelEMA, GradientAccumulator, WarmupScheduler
 )
 from mobilenet_ssdlite.utils.general import init_seeds, colorstr, increment_path, check_img_size
+from mobilenet_ssdlite.utils.anchors import get_or_compute_anchors
 
 
 # ============== 可用的 MobileNet Backbone 列表 ==============
@@ -239,6 +240,12 @@ def parse_args():
                         help='CUDA device (default: auto)')
     parser.add_argument('--seed', type=int, default=0,
                         help='Random seed (default: 0)')
+
+    # ===== Anchor 相关 =====
+    parser.add_argument('--auto-anchor', action='store_true', default=True,
+                        help='Auto compute anchors from dataset (default: True)')
+    parser.add_argument('--no-auto-anchor', action='store_true',
+                        help='Disable auto anchor computation, use default anchors')
 
     return parser.parse_args()
 
@@ -467,6 +474,20 @@ def main():
     print(f"Train dataset: {len(train_dataset)} images")
     print(f"Val dataset: {len(val_dataset)} images")
     print(f"Number of classes: {config['model']['num_classes']}")
+
+    # 计算或加载 anchors
+    if args.auto_anchor and not args.no_auto_anchor:
+        print(colorstr('bright_cyan', '\nAuto-computing anchors...'))
+        anchors = get_or_compute_anchors(
+            save_dir=str(save_dir),
+            yaml_path=data_yaml,
+            img_size=args.img_size,
+            n_anchors=9
+        )
+        config['anchors'] = anchors
+        print(colorstr('bright_green', f'Using computed anchors: {anchors}'))
+    else:
+        print(colorstr('bright_yellow', f'Using default anchors: {config["anchors"]}'))
 
     # 创建模型
     model = MobileNetYOLO(config).to(device)

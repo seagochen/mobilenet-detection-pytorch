@@ -75,9 +75,10 @@ class YOLOLoss(nn.Module):
             cls_pred = pred[..., 5:]  # [B, num_anchors, H, W, num_classes]
 
             # Build targets for this scale
-            box_target = torch.zeros_like(box_pred)
-            obj_target = torch.zeros_like(obj_pred)
-            cls_target = torch.zeros_like(cls_pred)
+            # Use float32 for targets to avoid dtype mismatch with AMP
+            box_target = torch.zeros(box_pred.shape, dtype=torch.float32, device=device)
+            obj_target = torch.zeros(obj_pred.shape, dtype=torch.float32, device=device)
+            cls_target = torch.zeros(cls_pred.shape, dtype=torch.float32, device=device)
 
             # Process each image in batch
             for batch_idx in range(batch_size):
@@ -180,21 +181,17 @@ class YOLOLoss(nn.Module):
         # Convert gt_boxes to center format
         gt_cx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
         gt_cy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
-        gt_w = gt_boxes[:, 2] - gt_boxes[:, 0]
-        gt_h = gt_boxes[:, 3] - gt_boxes[:, 1]
 
         # Find which grid cell each GT box falls into
         gt_grid_x = (gt_cx / stride).long().clamp(0, w - 1)
         gt_grid_y = (gt_cy / stride).long().clamp(0, h - 1)
 
-        # Compute IoU between GT boxes and anchors at each GT location
-        assigned_mask = torch.zeros(num_anchors, h, w, dtype=torch.bool, device=device)
-        assigned_anchors_list = []
-        assigned_targets_list = []
-        assigned_labels_list = []
+        # Use dict to track assignments, keeping highest IoU for each position
+        # Key: (anchor_idx, gy, gx), Value: (iou, gt_idx)
+        assignments = {}
 
         for i in range(len(gt_boxes)):
-            gx, gy = gt_grid_x[i], gt_grid_y[i]
+            gx, gy = gt_grid_x[i].item(), gt_grid_y[i].item()
 
             # Get anchors at this grid cell
             cell_anchors = anchors[:, gy, gx, :]  # [num_anchors, 4]
@@ -203,15 +200,28 @@ class YOLOLoss(nn.Module):
             ious = self._compute_iou(
                 gt_boxes[i:i+1],
                 cell_anchors
-            )
+            ).squeeze(0)  # [num_anchors]
 
             # Assign to anchor with highest IoU
-            best_anchor = ious.argmax()
+            best_anchor = ious.argmax().item()
+            best_iou = ious[best_anchor].item()
 
-            assigned_mask[best_anchor, gy, gx] = True
-            assigned_anchors_list.append(cell_anchors[best_anchor])
-            assigned_targets_list.append(gt_boxes[i])
-            assigned_labels_list.append(gt_labels[i])
+            key = (best_anchor, gy, gx)
+            # Only update if this GT has higher IoU than existing assignment
+            if key not in assignments or best_iou > assignments[key][0]:
+                assignments[key] = (best_iou, i)
+
+        # Build output tensors from assignments
+        assigned_mask = torch.zeros(num_anchors, h, w, dtype=torch.bool, device=device)
+        assigned_anchors_list = []
+        assigned_targets_list = []
+        assigned_labels_list = []
+
+        for (anchor_idx, gy, gx), (_, gt_idx) in assignments.items():
+            assigned_mask[anchor_idx, gy, gx] = True
+            assigned_anchors_list.append(anchors[anchor_idx, gy, gx, :])
+            assigned_targets_list.append(gt_boxes[gt_idx])
+            assigned_labels_list.append(gt_labels[gt_idx])
 
         if len(assigned_anchors_list) > 0:
             assigned_anchors = torch.stack(assigned_anchors_list)

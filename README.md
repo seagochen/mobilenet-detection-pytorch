@@ -36,10 +36,6 @@ Final Detections
 
 ```
 mobilenet-detection/
-├── configs/                    # Configuration files
-│   ├── default.yaml           # Legacy format config
-│   ├── yolo_format.yaml       # YOLO format config
-│   └── mobilenet_small.yaml
 ├── mobilenet_ssdlite/         # Main package
 │   ├── __init__.py
 │   ├── models/                # Model architecture
@@ -50,18 +46,18 @@ mobilenet-detection/
 │   │   └── loss.py           # Loss functions
 │   └── utils/                 # Utilities
 │       ├── __init__.py
-│       ├── dataset.py        # Dataset classes (YOLO & COCO)
+│       ├── dataset.py        # Dataset classes (YOLO format)
 │       ├── transforms.py     # Data augmentation
-│       └── visualize.py      # Visualization tools
+│       ├── metrics.py        # Evaluation metrics (mAP, etc.)
+│       ├── plots.py          # Training visualization
+│       ├── callbacks.py      # Training callbacks (EMA, early stopping, etc.)
+│       ├── general.py        # General utilities
+│       └── visualize.py      # Detection visualization
 ├── scripts/                   # Training and inference scripts
 │   ├── train.py              # Training script
 │   └── detect.py             # Inference script
-├── examples/                  # Usage examples
-│   └── basic_usage.py        # Basic usage example
-├── data/                      # Dataset directory
-│   └── dataset.yaml          # Example dataset config
-├── checkpoints/               # Model checkpoints (created during training)
-├── logs/                      # Training logs (created during training)
+├── runs/                      # Training outputs (created during training)
+│   └── train/                # Experiment directories
 └── setup.py                   # Package setup
 ```
 
@@ -77,28 +73,14 @@ mobilenet-detection/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mobilenet-detection.git
-cd mobilenet-detection
+git clone https://github.com/seagochen/mobilenet-detection-pytorch.git
+cd mobilenet-detection-pytorch
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
 ## Quick Start
-
-### 0. Basic Usage Example
-
-To quickly test the model and understand the API:
-
-```bash
-python examples/basic_usage.py
-```
-
-This will:
-- Load the model configuration
-- Create a MobileNet-YOLO model
-- Run inference on a dummy image
-- Display model information
 
 ### 1. Prepare Your Dataset
 
@@ -154,107 +136,54 @@ class_id x_center y_center width height
 ```
 where all coordinates are normalized to [0, 1].
 
-#### Option 2: Legacy Format
+### 2. Train the Model
 
-Organize your dataset in the following structure:
-
-```
-data/
-├── train/
-│   ├── images/
-│   │   ├── img1.jpg
-│   │   ├── img2.jpg
-│   │   └── ...
-│   └── annotations.json  # COCO format (optional)
-└── val/
-    ├── images/
-    └── annotations.json
-```
-
-### 2. Configure Your Model
-
-#### For YOLO Format Dataset
-
-Use `configs/yolo_format.yaml` or create your own:
-
-```yaml
-model:
-  backbone: "mobilenetv3_large_100"  # or mobilenetv3_small_100
-  num_classes: 80  # Will be auto-detected from dataset.yaml
-  input_size: [640, 640]
-
-data:
-  yaml: "path/to/your/dataset.yaml"  # Point to your YOLO dataset config
-```
-
-#### For Legacy Format
-
-Edit `configs/default.yaml`:
-
-```yaml
-model:
-  backbone: "mobilenetv3_large_100"
-  num_classes: 80
-  input_size: [640, 640]
-
-data:
-  train: "data/train"
-  val: "data/val"
-  names: ["person", "car", "dog"]  # Your class names
-```
-
-### 3. Train the Model
+The training script supports many command-line options. All configurations are passed via arguments - no config files needed.
 
 ```bash
-# Train with YOLO format dataset
-python scripts/train.py --config configs/yolo_format.yaml --device cuda
+# List available backbone models
+python scripts/train.py --list-backbones
 
-# Train with legacy format
-python scripts/train.py --config configs/default.yaml --device cuda
+# Basic training
+python scripts/train.py --data path/to/dataset.yaml --backbone mobilenetv3_large_100
 
-# Resume from checkpoint
-python scripts/train.py --config configs/yolo_format.yaml --resume checkpoints/checkpoint_epoch_50.pth
+# Training with custom settings
+python scripts/train.py --data path/to/dataset.yaml \
+                        --backbone mobilenetv3_small_100 \
+                        --img-size 640 \
+                        --batch-size 16 \
+                        --epochs 100 \
+                        --lr 0.001
+
+# Training with advanced features
+python scripts/train.py --data path/to/dataset.yaml \
+                        --backbone mobilenetv3_large_100 \
+                        --amp \               # Mixed precision training
+                        --ema \               # Exponential Moving Average
+                        --patience 10         # Early stopping
 ```
 
-Training outputs:
-- Checkpoints saved to `checkpoints/`
-- TensorBoard logs saved to `logs/`
-- Best model saved as `checkpoints/best.pth`
+Training outputs are saved to `runs/train/exp/`:
+- `weights/best.pt` - Best model checkpoint
+- `weights/last.pt` - Latest checkpoint
+- `metrics.csv` - Training metrics
+- Training curves and detection samples
 
-### 4. Run Inference
+### 3. Run Inference
 
 ```bash
 # Detect objects in a single image
-python scripts/detect.py --config configs/default.yaml \
-                         --checkpoint checkpoints/best.pth \
-                         --source image.jpg \
-                         --output output/
+python scripts/detect.py --weights runs/train/exp/weights/best.pt \
+                         --source image.jpg
 
 # Process a directory of images
-python scripts/detect.py --config configs/default.yaml \
-                         --checkpoint checkpoints/best.pth \
-                         --source data/test/ \
-                         --output output/
+python scripts/detect.py --weights runs/train/exp/weights/best.pt \
+                         --source path/to/images/
 
-# Process a video
-python scripts/detect.py --config configs/default.yaml \
-                         --checkpoint checkpoints/best.pth \
-                         --source video.mp4 \
-                         --output output/
-
-# Save detection results as text files
-python scripts/detect.py --checkpoint checkpoints/best.pth \
-                          --source image.jpg \
-                          --save-txt
-```
-
-### 5. Monitor Training
-
-```bash
-# Start TensorBoard
-tensorboard --logdir logs/
-
-# Open browser to http://localhost:6006
+# Save detection results
+python scripts/detect.py --weights runs/train/exp/weights/best.pt \
+                         --source image.jpg \
+                         --save-txt
 ```
 
 ## Model Architecture Details
@@ -325,39 +254,21 @@ Default weights: `λ_box=0.05, λ_obj=1.0, λ_cls=0.5`
 
 ## Customization
 
-### Using Different Backbones
+### Available Backbones
 
-The model supports any timm backbone with `features_only=True`:
+The training script supports multiple backbone architectures. Use `--list-backbones` to see all options:
 
-```yaml
-model:
-  backbone: "mobilenetv3_small_100"  # Faster
-  # backbone: "efficientnet_b0"      # More accurate
-  # backbone: "resnet50"              # Standard choice
+```bash
+python scripts/train.py --list-backbones
 ```
 
-### Custom Dataset
-
-1. Create COCO-format annotations or organize images in directories
-2. Update `configs/default.yaml`:
-   ```yaml
-   data:
-     train: "path/to/train"
-     val: "path/to/val"
-     names: ["class1", "class2", "class3"]
-
-   model:
-     num_classes: 3  # Match number of classes
-   ```
-
-### Anchor Customization
-
-To compute optimal anchors for your dataset:
-
-```python
-# TODO: Add anchor clustering script
-python scripts/compute_anchors.py --data data/train --num-anchors 9
-```
+Supported backbone families:
+- **MobileNetV2**: mobilenetv2_050, mobilenetv2_100, mobilenetv2_140, etc.
+- **MobileNetV3-Small**: mobilenetv3_small_050, mobilenetv3_small_100
+- **MobileNetV3-Large**: mobilenetv3_large_075, mobilenetv3_large_100 (recommended)
+- **MobileNetV4**: mobilenetv4_conv_small, mobilenetv4_conv_medium, mobilenetv4_hybrid_medium
+- **EfficientNet-Lite**: efficientnet_lite0, efficientnet_lite1, efficientnet_lite2
+- **MNASNet**: mnasnet_050, mnasnet_100
 
 ## Export and Deployment
 
@@ -401,11 +312,11 @@ traced_model.save('mobilenet_yolo.pt')
 
 ## Training Tips
 
-1. **Start with pretrained backbone**: Set `pretrained: true` in config
+1. **Start with pretrained backbone**: Enabled by default (use `--no-pretrained` to disable)
 2. **Use appropriate batch size**: 16-32 for 640x640 on GPUs with 8-16GB VRAM
-3. **Learning rate**: Start with 1e-3, use cosine annealing
-4. **Data augmentation**: Enable for training, disable for validation
-5. **Monitor training**: Use TensorBoard to track losses
+3. **Learning rate**: Default 1e-3 with cosine annealing schedule
+4. **Mixed precision**: Use `--amp` flag for faster training with less memory
+5. **EMA**: Use `--ema` for more stable model weights
 
 ## Troubleshooting
 
@@ -450,12 +361,7 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 ## TODO
 
-- [ ] Add anchor clustering tool
-- [ ] Add evaluation metrics (mAP calculation)
 - [ ] Add model export utilities (ONNX, TensorRT)
-- [ ] Add mixed precision training
-- [ ] Add Mosaic and MixUp augmentation
-- [ ] Pre-trained weights on COCO
 - [ ] Mobile deployment examples (iOS/Android)
 
 ## Contributing
