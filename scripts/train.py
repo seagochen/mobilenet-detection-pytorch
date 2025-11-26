@@ -235,7 +235,7 @@ def parse_args():
     parser.add_argument('--name', type=str, default='exp',
                         help='Experiment name (default: exp)')
     parser.add_argument('--resume', type=str, default='',
-                        help='Resume from checkpoint')
+                        help='Resume from experiment name (e.g., exp, exp_1)')
     parser.add_argument('--device', type=str, default='',
                         help='CUDA device (default: auto)')
     parser.add_argument('--seed', type=int, default=0,
@@ -307,6 +307,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch,
         pbar.set_postfix({
             'loss': f"{loss_dict['total_loss']:.4f}",
             'box': f"{loss_dict['box_loss']:.4f}",
+            'obj': f"{loss_dict['obj_loss']:.4f}",
             'cls': f"{loss_dict['cls_loss']:.4f}"
         })
 
@@ -432,7 +433,15 @@ def main():
     init_seeds(args.seed)
 
     # 目录设置
-    save_dir = Path(increment_path(Path(args.project) / args.name))
+    if args.resume:
+        # 恢复训练：使用指定的实验目录
+        save_dir = Path(args.project) / args.resume
+        if not save_dir.exists():
+            print(colorstr('bright_red', f'Experiment not found: {save_dir}'))
+            return
+    else:
+        # 新训练：创建新目录
+        save_dir = Path(increment_path(Path(args.project) / args.name))
     save_dir.mkdir(parents=True, exist_ok=True)
     weights_dir = save_dir / 'weights'
     weights_dir.mkdir(exist_ok=True)
@@ -528,10 +537,35 @@ def main():
     # 训练循环
     best_loss = float('inf')
     ema_val_loss = None  # EMA 平滑验证损失（用于稳定模型选择）
-    ema_alpha = 0.1  # EMA 衰减系数，越小越平滑
+    ema_alpha = 0.3  # EMA 衰减系数，越小越平滑
+    start_epoch = 0
+
+    # 恢复训练
+    if args.resume:
+        ckpt_path = weights_dir / 'last.pt'
+        if ckpt_path.exists():
+            print(colorstr('bright_cyan', f'\nResuming from {ckpt_path}'))
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt['model'])
+            if 'optimizer' in ckpt:
+                optimizer.load_state_dict(ckpt['optimizer'])
+            if 'scheduler' in ckpt:
+                scheduler.load_state_dict(ckpt['scheduler'])
+            if 'scaler' in ckpt and scaler is not None:
+                scaler.load_state_dict(ckpt['scaler'])
+            if 'ema' in ckpt and ema is not None:
+                ema.ema.load_state_dict(ckpt['ema'])
+            start_epoch = ckpt.get('epoch', 0) + 1
+            best_loss = ckpt.get('best_loss', float('inf'))
+            ema_val_loss = ckpt.get('ema_val_loss', None)
+            print(colorstr('bright_green', f'Resumed from epoch {start_epoch}, best_loss={best_loss:.4f}'))
+        else:
+            print(colorstr('bright_red', f'Checkpoint not found: {ckpt_path}'))
+            return
+
     print(f"\nLogging to {save_dir}\n")
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         # 训练
         train_loss, train_components = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch,
@@ -577,12 +611,21 @@ def main():
             }, weights_dir / 'best.pt')
             print(colorstr('bright_green', f"New best model: val_loss (EMA) = {best_loss:.4f}"))
 
-        # 保存 Last
-        torch.save({
+        # 保存 Last（包含完整状态用于恢复训练）
+        ckpt = {
             'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
             'epoch': epoch,
+            'best_loss': best_loss,
+            'ema_val_loss': ema_val_loss,
             'args': vars(args)
-        }, weights_dir / 'last.pt')
+        }
+        if scaler is not None:
+            ckpt['scaler'] = scaler.state_dict()
+        if ema is not None:
+            ckpt['ema'] = ema.ema.state_dict()
+        torch.save(ckpt, weights_dir / 'last.pt')
 
         # 早停（基于 EMA 平滑后的 val_loss）
         if early_stopping.step(ema_val_loss):

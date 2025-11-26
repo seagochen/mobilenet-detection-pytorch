@@ -1,5 +1,6 @@
 """
 YOLO Loss Functions for object detection
+Fixed: Separate positive/negative objectness loss to handle class imbalance
 """
 import torch
 import torch.nn as nn
@@ -10,6 +11,8 @@ class YOLOLoss(nn.Module):
     """
     YOLO-style loss function
     Combines box regression, objectness, and classification losses
+
+    Key fix: Separate obj/noobj loss to prevent background overwhelming foreground
     """
 
     def __init__(self, num_classes, anchors, strides, input_size, loss_weights=None):
@@ -35,6 +38,10 @@ class YOLOLoss(nn.Module):
         self.obj_weight = loss_weights['obj']
         self.cls_weight = loss_weights['cls']
 
+        # NoObj weight: reduce background loss contribution to prevent
+        # the massive number of negative samples from dominating training
+        self.noobj_weight = 0.5
+
         # Loss functions
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
         self.mse_loss = nn.MSELoss(reduction='none')
@@ -58,9 +65,9 @@ class YOLOLoss(nn.Module):
         device = predictions[0].device
         batch_size = predictions[0].size(0)
 
-        total_box_loss = 0
-        total_obj_loss = 0
-        total_cls_loss = 0
+        total_box_loss = torch.tensor(0.0, device=device)
+        total_obj_loss = torch.tensor(0.0, device=device)
+        total_cls_loss = torch.tensor(0.0, device=device)
         total_num_pos = 0
 
         # Process each scale
@@ -71,7 +78,7 @@ class YOLOLoss(nn.Module):
 
             # Split predictions
             box_pred = pred[..., :4]  # [B, num_anchors, H, W, 4]
-            obj_pred = pred[..., 4]  # [B, num_anchors, H, W]
+            obj_pred = pred[..., 4]   # [B, num_anchors, H, W]
             cls_pred = pred[..., 5:]  # [B, num_anchors, H, W, num_classes]
 
             # Build targets for this scale
@@ -98,7 +105,7 @@ class YOLOLoss(nn.Module):
                     # Get assigned positions
                     anchor_idx = assigned_mask.nonzero(as_tuple=True)
 
-                    # Compute box targets (offsets) - pass current stride
+                    # Compute box targets (offsets)
                     box_target[batch_idx][anchor_idx] = self._compute_box_targets(
                         assigned_targets, assigned_anchors, stride
                     )
@@ -113,23 +120,43 @@ class YOLOLoss(nn.Module):
                     ).float()
 
             # Compute losses
-            # Box loss (only for positive samples)
             pos_mask = obj_target > 0
-            num_pos = pos_mask.sum()
+            neg_mask = ~pos_mask
+            num_pos = pos_mask.sum().item()
+            num_neg = neg_mask.sum().item()
 
+            # Box loss (only for positive samples)
             if num_pos > 0:
-                # IoU-based box loss (GIoU or CIoU can be used)
-                box_loss = self._box_loss(
+                box_loss = self.mse_loss(
                     box_pred[pos_mask],
-                    box_target[pos_mask],
-                    anchor_boxes.unsqueeze(0).expand(batch_size, -1, -1, -1, -1)[pos_mask]
-                )
+                    box_target[pos_mask]
+                ).sum(dim=-1).mean()
                 total_box_loss += box_loss
                 total_num_pos += num_pos
 
-            # Objectness loss (all samples)
-            obj_loss = self.bce_loss(obj_pred, obj_target).mean()
-            total_obj_loss += obj_loss
+            # === KEY FIX: Separate Obj/NoObj Loss ===
+            # This prevents the massive number of background samples from
+            # overwhelming the few positive samples
+
+            # Positive objectness loss (foreground)
+            if num_pos > 0:
+                obj_loss_pos = self.bce_loss(
+                    obj_pred[pos_mask],
+                    obj_target[pos_mask]
+                ).mean()
+            else:
+                obj_loss_pos = torch.tensor(0.0, device=device)
+
+            # Negative objectness loss (background) - weighted down
+            if num_neg > 0:
+                obj_loss_neg = self.bce_loss(
+                    obj_pred[neg_mask],
+                    obj_target[neg_mask]
+                ).mean() * self.noobj_weight
+            else:
+                obj_loss_neg = torch.tensor(0.0, device=device)
+
+            total_obj_loss += obj_loss_pos + obj_loss_neg
 
             # Class loss (only for positive samples)
             if num_pos > 0:
@@ -269,22 +296,6 @@ class YOLOLoss(nn.Module):
 
         targets = torch.stack([tx, ty, tw, th], dim=-1)
         return targets
-
-    def _box_loss(self, pred, target, anchors):
-        """
-        Compute box regression loss (MSE on offsets)
-
-        Args:
-            pred: [N, 4] predicted offsets
-            target: [N, 4] target offsets
-            anchors: [N, 4] anchor boxes
-
-        Returns:
-            loss: Box regression loss
-        """
-        # Simple MSE loss on offsets
-        loss = self.mse_loss(pred, target).sum(dim=-1).mean()
-        return loss
 
     @staticmethod
     def _compute_iou(boxes1, boxes2):
