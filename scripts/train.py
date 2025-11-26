@@ -268,7 +268,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch,
             t['labels'] = t['labels'].to(device)
 
         # 前向传播 (AMP)
-        with torch.cuda.amp.autocast(enabled=scaler is not None):
+        with torch.amp.autocast('cuda', enabled=scaler is not None):
             predictions, anchors = model(images, targets)
             loss_dict, loss = criterion(predictions, anchors, targets)
 
@@ -516,7 +516,7 @@ def main():
 
     # 训练工具
     plotter = TrainingPlotter(save_dir)
-    scaler = torch.cuda.amp.GradScaler() if args.amp else None
+    scaler = torch.amp.GradScaler('cuda') if args.amp else None
     ema = ModelEMA(model) if args.ema else None
     accumulator = GradientAccumulator(args.accumulation_steps) if args.accumulation_steps > 1 else None
     early_stopping = EarlyStopping(patience=args.patience, verbose=True)
@@ -526,7 +526,9 @@ def main():
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
 
     # 训练循环
-    best_map = 0.0
+    best_loss = float('inf')
+    ema_val_loss = None  # EMA 平滑验证损失（用于稳定模型选择）
+    ema_alpha = 0.1  # EMA 衰减系数，越小越平滑
     print(f"\nLogging to {save_dir}\n")
 
     for epoch in range(args.epochs):
@@ -552,25 +554,28 @@ def main():
         plotter.update(epoch, metrics_all)
         plotter.save_metrics_csv()
 
-        # 打印结果
-        print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {val_metrics['val_loss']:.4f}")
+        # 计算 EMA 平滑验证损失
+        current_val_loss = val_metrics['val_loss']
+        if ema_val_loss is None:
+            ema_val_loss = current_val_loss
+        else:
+            ema_val_loss = ema_alpha * current_val_loss + (1 - ema_alpha) * ema_val_loss
 
-        # 判断是否有改善（用于早停）
-        is_improved = False
+        # 打印结果
+        print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {current_val_loss:.4f} (EMA: {ema_val_loss:.4f})")
         if compute_metrics and 'mAP@0.5' in val_metrics:
             print(f"Metrics: mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
 
-            # 保存最佳模型
-            if val_metrics['mAP@0.5'] > best_map:
-                best_map = val_metrics['mAP@0.5']
-                is_improved = True  # best 模型更新，标记为有改善
-                torch.save({
-                    'model': val_model.state_dict(),
-                    'best_map': best_map,
-                    'epoch': epoch,
-                    'args': vars(args)
-                }, weights_dir / 'best.pt')
-                print(colorstr('bright_green', f"New best model: mAP@0.5 = {best_map:.4f}"))
+        # 保存最佳模型（基于 EMA 平滑后的 val_loss）
+        if ema_val_loss < best_loss:
+            best_loss = ema_val_loss
+            torch.save({
+                'model': val_model.state_dict(),
+                'best_loss': best_loss,
+                'epoch': epoch,
+                'args': vars(args)
+            }, weights_dir / 'best.pt')
+            print(colorstr('bright_green', f"New best model: val_loss (EMA) = {best_loss:.4f}"))
 
         # 保存 Last
         torch.save({
@@ -579,14 +584,14 @@ def main():
             'args': vars(args)
         }, weights_dir / 'last.pt')
 
-        # 早停：当 best 模型更新时重置计数器
-        if early_stopping.step(val_metrics['val_loss'], improved=is_improved):
+        # 早停（基于 EMA 平滑后的 val_loss）
+        if early_stopping.step(ema_val_loss):
             print("Early stopping triggered")
             break
 
     plotter.plot_training_curves()
     print(f"\nTraining complete. Results saved to {save_dir}")
-    print(f"Best mAP@0.5: {best_map:.4f}")
+    print(f"Best val_loss (EMA): {best_loss:.4f}")
 
 
 if __name__ == '__main__':
