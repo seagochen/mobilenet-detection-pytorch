@@ -15,7 +15,7 @@ class YOLOLoss(nn.Module):
     Key fix: Separate obj/noobj loss to prevent background overwhelming foreground
     """
 
-    def __init__(self, num_classes, anchors, strides, input_size, loss_weights=None):
+    def __init__(self, num_classes, anchors, strides, input_size, loss_weights=None, label_smoothing=0.0):
         """
         Args:
             num_classes: Number of object classes
@@ -23,6 +23,7 @@ class YOLOLoss(nn.Module):
             strides: Feature map strides [8, 16, 32]
             input_size: Input image size [H, W]
             loss_weights: Dict with 'box', 'obj', 'cls' weights
+            label_smoothing: Label smoothing factor (0.0 = no smoothing, typical: 0.05-0.1)
         """
         super().__init__()
 
@@ -30,6 +31,7 @@ class YOLOLoss(nn.Module):
         self.anchors = anchors
         self.strides = strides
         self.input_size = input_size
+        self.label_smoothing = label_smoothing
 
         # Loss weights
         if loss_weights is None:
@@ -113,11 +115,16 @@ class YOLOLoss(nn.Module):
                     # Objectness target
                     obj_target[batch_idx][anchor_idx] = 1.0
 
-                    # Class targets (one-hot)
-                    cls_target[batch_idx][anchor_idx] = F.one_hot(
+                    # Class targets (one-hot with optional label smoothing)
+                    one_hot = F.one_hot(
                         assigned_labels.long(),
                         num_classes=self.num_classes
                     ).float()
+                    # Apply label smoothing: smooth = (1 - eps) * one_hot + eps / num_classes
+                    if self.label_smoothing > 0:
+                        one_hot = one_hot * (1.0 - self.label_smoothing) + \
+                                  self.label_smoothing / self.num_classes
+                    cls_target[batch_idx][anchor_idx] = one_hot
 
             # Compute losses
             pos_mask = obj_target > 0

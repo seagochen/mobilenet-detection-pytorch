@@ -208,6 +208,8 @@ def parse_args():
                         help='Objectness loss weight (default: 1.0)')
     parser.add_argument('--lambda-cls', type=float, default=0.5,
                         help='Classification loss weight (default: 0.5)')
+    parser.add_argument('--label-smoothing', type=float, default=0.0,
+                        help='Label smoothing factor for classification (default: 0.0, typical: 0.05-0.1)')
 
     # ===== 高级特性 =====
     parser.add_argument('--ema', action='store_true',
@@ -462,6 +464,8 @@ def main():
     print(colorstr('bright_cyan', f'Backbone: {args.backbone}'))
     print(colorstr('bright_cyan', f'Image size: {args.img_size}x{args.img_size}'))
     print(colorstr('bright_cyan', f'FPN channels: {args.fpn_channels}'))
+    if args.label_smoothing > 0:
+        print(colorstr('bright_cyan', f'Label smoothing: {args.label_smoothing}'))
 
     # 加载数据集
     train_transforms = get_transforms(config, is_train=True)
@@ -526,7 +530,8 @@ def main():
         model.anchor_generator,
         model.strides,
         config['model']['input_size'],
-        config['train']['loss_weights']
+        config['train']['loss_weights'],
+        label_smoothing=args.label_smoothing
     )
 
     # 训练工具
@@ -565,6 +570,7 @@ def main():
 
     # 训练循环
     best_loss = float('inf')
+    best_mAP = 0.0  # 最佳 mAP
     ema_val_loss = None  # EMA 平滑验证损失（用于稳定模型选择）
     ema_alpha = 0.3  # EMA 衰减系数，越小越平滑
     start_epoch = 0
@@ -588,8 +594,9 @@ def main():
                 ema.ema.load_state_dict(ckpt['ema'])
             start_epoch = ckpt.get('epoch', 0) + 1
             best_loss = ckpt.get('best_loss', float('inf'))
+            best_mAP = ckpt.get('best_mAP', 0.0)
             ema_val_loss = ckpt.get('ema_val_loss', None)
-            print(colorstr('bright_green', f'Resumed from epoch {start_epoch}, best_loss={best_loss:.4f}'))
+            print(colorstr('bright_green', f'Resumed from epoch {start_epoch}, best_loss={best_loss:.4f}, best_mAP={best_mAP:.4f}'))
         else:
             print(colorstr('bright_red', f'Checkpoint not found: {ckpt_path}'))
             return
@@ -646,16 +653,42 @@ def main():
         if compute_metrics and 'mAP@0.5' in val_metrics:
             print(f"mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
 
-        # 保存最佳模型（基于 EMA 平滑后的 val_loss）
-        if ema_val_loss < best_loss:
-            best_loss = ema_val_loss
+        # 保存最佳模型（混合策略）
+        # - 当 mAP 评估启用时：mAP 提升或 val_loss 下降都会更新模型
+        # - 当 mAP 评估未启用时：仅根据 val_loss 更新
+        save_best = False
+        save_reason = ""
+        current_mAP = val_metrics.get('mAP@0.5', None)
+
+        if compute_metrics and current_mAP is not None:
+            # mAP 评估已启用：mAP 提升或 val_loss 下降都更新
+            if current_mAP > best_mAP:
+                save_best = True
+                save_reason = f"mAP improved: {best_mAP:.4f} -> {current_mAP:.4f}"
+                best_mAP = current_mAP
+            if ema_val_loss < best_loss:
+                save_best = True
+                if save_reason:
+                    save_reason += f", val_loss (EMA) improved: {best_loss:.4f} -> {ema_val_loss:.4f}"
+                else:
+                    save_reason = f"val_loss (EMA) improved: {best_loss:.4f} -> {ema_val_loss:.4f}"
+                best_loss = ema_val_loss
+        else:
+            # mAP 评估未启用：仅依赖 val_loss
+            if ema_val_loss < best_loss:
+                save_best = True
+                save_reason = f"val_loss (EMA) improved: {best_loss:.4f} -> {ema_val_loss:.4f}"
+                best_loss = ema_val_loss
+
+        if save_best:
             torch.save({
                 'model': val_model.state_dict(),
                 'best_loss': best_loss,
+                'best_mAP': best_mAP,
                 'epoch': epoch,
                 'args': vars(args)
             }, weights_dir / 'best.pt')
-            print(colorstr('bright_green', f"New best model: val_loss (EMA) = {best_loss:.4f}"))
+            print(colorstr('bright_green', f"New best model saved: {save_reason}"))
 
         # 保存 Last（包含完整状态用于恢复训练）
         ckpt = {
@@ -665,6 +698,7 @@ def main():
             'lr_plateau': lr_plateau.state_dict(),
             'epoch': epoch,
             'best_loss': best_loss,
+            'best_mAP': best_mAP,
             'ema_val_loss': ema_val_loss,
             'args': vars(args)
         }
@@ -687,7 +721,7 @@ def main():
 
     plotter.plot_training_curves()
     print(f"\nTraining complete. Results saved to {save_dir}")
-    print(f"Best val_loss (EMA): {best_loss:.4f}")
+    print(f"Best val_loss (EMA): {best_loss:.4f}, Best mAP@0.5: {best_mAP:.4f}")
 
 
 if __name__ == '__main__':
