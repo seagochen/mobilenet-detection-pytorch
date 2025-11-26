@@ -1,10 +1,71 @@
 """
 YOLO Loss Functions for object detection
 Fixed: Separate positive/negative objectness loss to handle class imbalance
+Improved: CIoU loss for better box regression
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
+
+
+def bbox_iou(box1, box2, xywh=False, CIoU=True, eps=1e-7):
+    """
+    Calculate IoU/CIoU between two sets of boxes.
+
+    Args:
+        box1: [N, 4] predicted boxes
+        box2: [N, 4] target boxes
+        xywh: if True, boxes are in (cx, cy, w, h) format; else (x1, y1, x2, y2)
+        CIoU: if True, compute Complete IoU; else compute standard IoU
+
+    Returns:
+        iou: [N] IoU/CIoU values
+    """
+    if xywh:
+        # Convert (cx, cy, w, h) to (x1, y1, x2, y2)
+        b1_x1 = box1[:, 0] - box1[:, 2] / 2
+        b1_y1 = box1[:, 1] - box1[:, 3] / 2
+        b1_x2 = box1[:, 0] + box1[:, 2] / 2
+        b1_y2 = box1[:, 1] + box1[:, 3] / 2
+        b2_x1 = box2[:, 0] - box2[:, 2] / 2
+        b2_y1 = box2[:, 1] - box2[:, 3] / 2
+        b2_x2 = box2[:, 0] + box2[:, 2] / 2
+        b2_y2 = box2[:, 1] + box2[:, 3] / 2
+    else:
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
+
+    # Intersection area
+    inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
+            (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+
+    # Union area
+    w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
+    w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+    union = w1 * h1 + w2 * h2 - inter + eps
+
+    # IoU
+    iou = inter / union
+
+    if CIoU:
+        # Convex (smallest enclosing box) diagonal squared
+        cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)
+        ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)
+        c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+
+        # Center distance squared
+        rho2 = ((b1_x1 + b1_x2 - b2_x1 - b2_x2) ** 2 +
+                (b1_y1 + b1_y2 - b2_y1 - b2_y2) ** 2) / 4
+
+        # Aspect ratio consistency
+        v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / (h2 + eps)) - torch.atan(w1 / (h1 + eps)), 2)
+        with torch.no_grad():
+            alpha = v / (v - iou + 1 + eps)
+
+        return iou - (rho2 / c2 + v * alpha)  # CIoU
+
+    return iou
 
 
 class YOLOLoss(nn.Module):
@@ -85,9 +146,13 @@ class YOLOLoss(nn.Module):
 
             # Build targets for this scale
             # Use float32 for targets to avoid dtype mismatch with AMP
-            box_target = torch.zeros(box_pred.shape, dtype=torch.float32, device=device)
             obj_target = torch.zeros(obj_pred.shape, dtype=torch.float32, device=device)
             cls_target = torch.zeros(cls_pred.shape, dtype=torch.float32, device=device)
+
+            # For CIoU loss: store GT boxes and anchor boxes for positive samples
+            all_gt_boxes = []  # GT boxes in xyxy format
+            all_anchor_boxes = []  # Anchor boxes in cxcywh format
+            all_pos_indices = []  # (batch_idx, anchor_idx, gy, gx) tuples
 
             # Process each image in batch
             for batch_idx in range(batch_size):
@@ -107,10 +172,18 @@ class YOLOLoss(nn.Module):
                     # Get assigned positions
                     anchor_idx = assigned_mask.nonzero(as_tuple=True)
 
-                    # Compute box targets (offsets)
-                    box_target[batch_idx][anchor_idx] = self._compute_box_targets(
-                        assigned_targets, assigned_anchors, stride
-                    )
+                    # Store GT boxes and anchors for CIoU computation
+                    all_gt_boxes.append(assigned_targets)  # [M, 4] xyxy
+                    all_anchor_boxes.append(assigned_anchors)  # [M, 4] cxcywh
+
+                    # Store indices for extracting predictions
+                    for i in range(len(assigned_targets)):
+                        all_pos_indices.append((
+                            batch_idx,
+                            anchor_idx[0][i].item(),
+                            anchor_idx[1][i].item(),
+                            anchor_idx[2][i].item()
+                        ))
 
                     # Objectness target
                     obj_target[batch_idx][anchor_idx] = 1.0
@@ -132,12 +205,24 @@ class YOLOLoss(nn.Module):
             num_pos = pos_mask.sum().item()
             num_neg = neg_mask.sum().item()
 
-            # Box loss (only for positive samples)
-            if num_pos > 0:
-                box_loss = self.mse_loss(
-                    box_pred[pos_mask],
-                    box_target[pos_mask]
-                ).sum(dim=-1).mean()
+            # Box loss using CIoU (only for positive samples)
+            if num_pos > 0 and len(all_gt_boxes) > 0:
+                # Concatenate all GT and anchor boxes
+                gt_boxes_cat = torch.cat(all_gt_boxes, dim=0)  # [num_pos, 4] xyxy
+                anchor_boxes_cat = torch.cat(all_anchor_boxes, dim=0)  # [num_pos, 4] cxcywh
+
+                # Extract predictions for positive samples and decode to xyxy
+                pred_offsets = []
+                for (b, a, gy, gx) in all_pos_indices:
+                    pred_offsets.append(box_pred[b, a, gy, gx])
+                pred_offsets = torch.stack(pred_offsets, dim=0)  # [num_pos, 4]
+
+                # Decode predictions: offset -> xyxy coordinates
+                pred_boxes = self._decode_boxes(pred_offsets, anchor_boxes_cat, stride)
+
+                # Compute CIoU loss
+                ciou = bbox_iou(pred_boxes, gt_boxes_cat, xywh=False, CIoU=True)
+                box_loss = (1.0 - ciou).mean()
                 total_box_loss += box_loss
                 total_num_pos += num_pos
 
@@ -315,6 +400,41 @@ class YOLOLoss(nn.Module):
 
         targets = torch.stack([tx, ty, tw, th], dim=-1)
         return targets
+
+    def _decode_boxes(self, offsets, anchors, stride):
+        """
+        Decode box predictions from offsets to xyxy coordinates.
+
+        Args:
+            offsets: [N, 4] predicted offsets (tx, ty, tw, th)
+            anchors: [N, 4] anchor boxes (cx, cy, w, h)
+            stride: Current feature map stride
+
+        Returns:
+            boxes: [N, 4] decoded boxes (x1, y1, x2, y2)
+        """
+        # Get anchor parameters
+        anchor_cx = anchors[:, 0]
+        anchor_cy = anchors[:, 1]
+        anchor_w = anchors[:, 2]
+        anchor_h = anchors[:, 3]
+
+        # Decode offsets
+        tx, ty, tw, th = offsets[:, 0], offsets[:, 1], offsets[:, 2], offsets[:, 3]
+
+        # Predicted center and size
+        pred_cx = tx * stride + anchor_cx
+        pred_cy = ty * stride + anchor_cy
+        pred_w = torch.exp(tw.clamp(max=10)) * anchor_w  # clamp to prevent overflow
+        pred_h = torch.exp(th.clamp(max=10)) * anchor_h
+
+        # Convert to xyxy
+        x1 = pred_cx - pred_w / 2
+        y1 = pred_cy - pred_h / 2
+        x2 = pred_cx + pred_w / 2
+        y2 = pred_cy + pred_h / 2
+
+        return torch.stack([x1, y1, x2, y2], dim=-1)
 
     @staticmethod
     def _compute_iou(boxes1, boxes2):

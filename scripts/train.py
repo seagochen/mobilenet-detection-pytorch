@@ -6,6 +6,7 @@ import os
 import sys
 import argparse
 import yaml
+import math
 import torch
 import torch.optim as optim
 import numpy as np
@@ -33,7 +34,7 @@ from mobilenet_ssdlite.utils.general import init_seeds, colorstr, increment_path
 from mobilenet_ssdlite.utils.anchors import get_or_compute_anchors
 
 
-# ============== 可用的 MobileNet Backbone 列表 ==============
+# ============== 可用的 Backbone 列表 ==============
 AVAILABLE_BACKBONES = {
     # MobileNetV2 系列
     'mobilenetv2_050': {'params': '2.0M', 'desc': 'MobileNetV2 0.5x width'},
@@ -66,6 +67,11 @@ AVAILABLE_BACKBONES = {
     # MNASNet 系列
     'mnasnet_050': {'params': '1.0M', 'desc': 'MNASNet 0.5x'},
     'mnasnet_100': {'params': '4.4M', 'desc': 'MNASNet 1.0x'},
+
+    # ResNet 系列 (标准卷积，用于验证代码正确性)
+    'resnet18': {'params': '11.7M', 'desc': 'ResNet-18 (standard conv, for debugging)'},
+    'resnet34': {'params': '21.8M', 'desc': 'ResNet-34 (standard conv, for debugging)'},
+    'resnet50': {'params': '25.6M', 'desc': 'ResNet-50 (standard conv, for debugging)'},
 }
 
 # ============== 默认 Anchor 配置 ==============
@@ -89,6 +95,7 @@ def list_available_backbones():
         'MobileNetV4': [k for k in AVAILABLE_BACKBONES if k.startswith('mobilenetv4')],
         'EfficientNet-Lite': [k for k in AVAILABLE_BACKBONES if k.startswith('efficientnet_lite')],
         'MNASNet': [k for k in AVAILABLE_BACKBONES if k.startswith('mnasnet')],
+        'ResNet (Debug)': [k for k in AVAILABLE_BACKBONES if k.startswith('resnet')],
     }
 
     for category, backbones in categories.items():
@@ -184,8 +191,8 @@ def parse_args():
                         help='Number of dataloader workers (default: 8)')
 
     # ===== 模型相关 =====
-    parser.add_argument('--fpn-channels', type=int, default=256,
-                        help='FPN output channels (default: 256)')
+    parser.add_argument('--fpn-channels', type=int, default=128,
+                        help='FPN output channels (default: 128, suitable for lightweight backbones)')
     parser.add_argument('--no-pretrained', action='store_true',
                         help='Do not use pretrained backbone weights')
 
@@ -194,16 +201,19 @@ def parse_args():
                         help='Number of training epochs (default: 100)')
     parser.add_argument('--lr', type=float, default=1e-3,
                         help='Initial learning rate (default: 0.001)')
-    parser.add_argument('--weight-decay', type=float, default=5e-4,
-                        help='Weight decay (default: 0.0005)')
-    parser.add_argument('--warmup-epochs', type=int, default=3,
-                        help='Warmup epochs (default: 3)')
+    parser.add_argument('--weight-decay', type=float, default=5e-5,
+                        help='Weight decay (default: 0.00005, lower for lightweight models)')
+    parser.add_argument('--warmup-epochs', type=int, default=5,
+                        help='Warmup epochs (default: 5)')
     parser.add_argument('--grad-clip', type=float, default=10.0,
                         help='Gradient clipping max norm (default: 10.0)')
+    parser.add_argument('--scheduler', type=str, default='cosine',
+                        choices=['cosine', 'plateau'],
+                        help='LR scheduler: cosine or plateau (default: cosine)')
 
     # ===== 损失权重 =====
-    parser.add_argument('--lambda-box', type=float, default=0.05,
-                        help='Box loss weight (default: 0.05)')
+    parser.add_argument('--lambda-box', type=float, default=7.5,
+                        help='Box loss weight (default: 7.5, higher for CIoU loss)')
     parser.add_argument('--lambda-obj', type=float, default=1.0,
                         help='Objectness loss weight (default: 1.0)')
     parser.add_argument('--lambda-cls', type=float, default=0.5,
@@ -547,18 +557,36 @@ def main():
         verbose=True
     ) if args.early_stopping > 0 else None
 
-    # LR Scheduler (Warmup + ReduceLROnPlateau)
-    # - Warmup: 前 warmup_epochs 个 epoch 线性增加到目标学习率
-    # - ReduceLROnPlateau: 之后当验证损失不下降时降低学习率
-    def lr_lambda(epoch):
-        if epoch < args.warmup_epochs:
-            # Warmup: 线性从 0 增加到 1
-            return (epoch + 1) / args.warmup_epochs
-        return 1.0  # Warmup 结束后保持不变，由 ReduceLROnPlateau 接管
+    # LR Scheduler setup
+    # Warmup: 前 warmup_epochs 个 epoch 线性增加到目标学习率
+    total_epochs = args.epochs
+    warmup_epochs = args.warmup_epochs
 
-    warmup_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    if args.scheduler == 'cosine':
+        # Cosine Annealing with Warmup (recommended for lightweight models)
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                return (epoch + 1) / warmup_epochs
+            # Cosine decay after warmup
+            progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+            return args.min_lr / args.lr + (1 - args.min_lr / args.lr) * 0.5 * (1 + math.cos(math.pi * progress))
 
-    # ReduceLROnPlateau - 当验证损失不下降时降低学习率
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+        scheduler_type = 'cosine'
+        print(colorstr('bright_cyan', f'Using Cosine Annealing scheduler with {warmup_epochs} warmup epochs'))
+
+    else:  # plateau
+        # ReduceLROnPlateau with Warmup (original behavior)
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                return (epoch + 1) / warmup_epochs
+            return 1.0
+
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+        scheduler_type = 'plateau'
+        print(colorstr('bright_cyan', f'Using ReduceLROnPlateau scheduler with {warmup_epochs} warmup epochs'))
+
+    # ReduceLROnPlateau - only used when scheduler='plateau'
     lr_plateau = ReduceLROnPlateau(
         optimizer,
         mode='min',
@@ -566,7 +594,7 @@ def main():
         patience=args.patience,
         min_lr=args.min_lr,
         verbose=True
-    )
+    ) if args.scheduler == 'plateau' else None
 
     # 训练循环
     best_loss = float('inf')
@@ -584,9 +612,9 @@ def main():
             model.load_state_dict(ckpt['model'])
             if 'optimizer' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer'])
-            if 'warmup_scheduler' in ckpt:
-                warmup_scheduler.load_state_dict(ckpt['warmup_scheduler'])
-            if 'lr_plateau' in ckpt:
+            if 'scheduler' in ckpt:
+                scheduler.load_state_dict(ckpt['scheduler'])
+            if 'lr_plateau' in ckpt and lr_plateau is not None:
                 lr_plateau.load_state_dict(ckpt['lr_plateau'])
             if 'scaler' in ckpt and scaler is not None:
                 scaler.load_state_dict(ckpt['scaler'])
@@ -629,13 +657,18 @@ def main():
 
         # 更新学习率调度
         current_val_loss = val_metrics['val_loss']
-        if epoch < args.warmup_epochs:
-            # Warmup 阶段使用 LambdaLR
-            warmup_scheduler.step()
-            lr_reduced = False
-        else:
-            # Warmup 结束后，由 ReduceLROnPlateau 根据验证损失调整
-            lr_reduced = lr_plateau.step(current_val_loss)
+        lr_reduced = False
+
+        if scheduler_type == 'cosine':
+            # Cosine scheduler updates per epoch
+            scheduler.step()
+        else:  # plateau
+            if epoch < args.warmup_epochs:
+                # Warmup 阶段
+                scheduler.step()
+            else:
+                # Warmup 结束后，由 ReduceLROnPlateau 根据验证损失调整
+                lr_reduced = lr_plateau.step(current_val_loss)
 
         # 记录指标
         metrics_all = {'train_loss': train_loss, **val_metrics}
@@ -694,22 +727,24 @@ def main():
         ckpt = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'warmup_scheduler': warmup_scheduler.state_dict(),
-            'lr_plateau': lr_plateau.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'scheduler_type': scheduler_type,
             'epoch': epoch,
             'best_loss': best_loss,
             'best_mAP': best_mAP,
             'ema_val_loss': ema_val_loss,
             'args': vars(args)
         }
+        if lr_plateau is not None:
+            ckpt['lr_plateau'] = lr_plateau.state_dict()
         if scaler is not None:
             ckpt['scaler'] = scaler.state_dict()
         if ema is not None:
             ckpt['ema'] = ema.ema.state_dict()
         torch.save(ckpt, weights_dir / 'last.pt')
 
-        # 早停检查（基于学习率降低次数）
-        if early_stopping:
+        # 早停检查（基于学习率降低次数，仅在 plateau scheduler 时有效）
+        if early_stopping and lr_plateau is not None:
             should_stop = early_stopping.step(
                 ema_val_loss,
                 lr_reduced=lr_reduced,
