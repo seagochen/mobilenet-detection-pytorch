@@ -404,9 +404,10 @@ class YOLOLoss(nn.Module):
     def _decode_boxes(self, offsets, anchors, stride):
         """
         Decode box predictions from offsets to xyxy coordinates.
+        IMPORTANT: Must match inference decoder logic in detection_head.py
 
         Args:
-            offsets: [N, 4] predicted offsets (tx, ty, tw, th)
+            offsets: [N, 4] raw network outputs (tx, ty, tw, th)
             anchors: [N, 4] anchor boxes (cx, cy, w, h)
             stride: Current feature map stride
 
@@ -419,12 +420,18 @@ class YOLOLoss(nn.Module):
         anchor_w = anchors[:, 2]
         anchor_h = anchors[:, 3]
 
-        # Decode offsets
-        tx, ty, tw, th = offsets[:, 0], offsets[:, 1], offsets[:, 2], offsets[:, 3]
+        # Decode offsets - MUST match detection_head.py YOLODecoder
+        # Apply sigmoid to tx, ty and scale to [-0.5, 1.5] range (YOLOv5 style)
+        tx = torch.sigmoid(offsets[:, 0])
+        ty = torch.sigmoid(offsets[:, 1])
+        tw = offsets[:, 2]
+        th = offsets[:, 3]
 
-        # Predicted center and size
-        pred_cx = tx * stride + anchor_cx
-        pred_cy = ty * stride + anchor_cy
+        # Predicted center: (sigmoid(tx) - 0.5) * 2 * stride + anchor_cx
+        pred_cx = (tx - 0.5) * 2 * stride + anchor_cx
+        pred_cy = (ty - 0.5) * 2 * stride + anchor_cy
+
+        # Predicted size: exp(tw) * anchor_w
         pred_w = torch.exp(tw.clamp(max=10)) * anchor_w  # clamp to prevent overflow
         pred_h = torch.exp(th.clamp(max=10)) * anchor_h
 
