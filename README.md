@@ -153,6 +153,8 @@ python scripts/train.py --data path/to/dataset.yaml \
                         --img-size 640 \
                         --batch-size 16 \
                         --epochs 100 \
+                        --fpn-channels 128 \
+                        --amp --ema --patience 10 \
                         --lr 0.001
 
 # Training with advanced features

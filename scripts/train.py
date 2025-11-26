@@ -216,8 +216,14 @@ def parse_args():
                         help='Use Automatic Mixed Precision')
     parser.add_argument('--accumulation-steps', type=int, default=1,
                         help='Gradient accumulation steps (default: 1)')
-    parser.add_argument('--patience', type=int, default=10,
-                        help='Early stopping patience (default: 10)')
+    parser.add_argument('--patience', type=int, default=5,
+                        help='Patience for ReduceLROnPlateau (epochs without improvement)')
+    parser.add_argument('--lr-factor', type=float, default=0.1,
+                        help='Factor to reduce learning rate (default: 0.1)')
+    parser.add_argument('--min-lr', type=float, default=1e-6,
+                        help='Minimum learning rate (default: 1e-6)')
+    parser.add_argument('--early-stopping', type=int, default=0,
+                        help='Early stopping after N LR reductions (0=disabled, default: 0)')
 
     # ===== 评估相关 =====
     parser.add_argument('--eval-interval', type=int, default=1,
@@ -528,11 +534,34 @@ def main():
     scaler = torch.amp.GradScaler('cuda') if args.amp else None
     ema = ModelEMA(model) if args.ema else None
     accumulator = GradientAccumulator(args.accumulation_steps) if args.accumulation_steps > 1 else None
-    early_stopping = EarlyStopping(patience=args.patience, verbose=True)
+    early_stopping = EarlyStopping(
+        patience=args.patience,
+        mode='min',
+        check_lr_reductions=True,
+        max_lr_reductions=args.early_stopping,
+        verbose=True
+    ) if args.early_stopping > 0 else None
 
-    # LR Scheduler (Cosine)
-    lf = lambda x: ((1 - np.cos(x * np.pi / args.epochs)) / 2) * (1 - 0.1) + 0.1
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    # LR Scheduler (Warmup + ReduceLROnPlateau)
+    # - Warmup: 前 warmup_epochs 个 epoch 线性增加到目标学习率
+    # - ReduceLROnPlateau: 之后当验证损失不下降时降低学习率
+    def lr_lambda(epoch):
+        if epoch < args.warmup_epochs:
+            # Warmup: 线性从 0 增加到 1
+            return (epoch + 1) / args.warmup_epochs
+        return 1.0  # Warmup 结束后保持不变，由 ReduceLROnPlateau 接管
+
+    warmup_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    # ReduceLROnPlateau - 当验证损失不下降时降低学习率
+    lr_plateau = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=args.lr_factor,
+        patience=args.patience,
+        min_lr=args.min_lr,
+        verbose=True
+    )
 
     # 训练循环
     best_loss = float('inf')
@@ -549,8 +578,10 @@ def main():
             model.load_state_dict(ckpt['model'])
             if 'optimizer' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer'])
-            if 'scheduler' in ckpt:
-                scheduler.load_state_dict(ckpt['scheduler'])
+            if 'warmup_scheduler' in ckpt:
+                warmup_scheduler.load_state_dict(ckpt['warmup_scheduler'])
+            if 'lr_plateau' in ckpt:
+                lr_plateau.load_state_dict(ckpt['lr_plateau'])
             if 'scaler' in ckpt and scaler is not None:
                 scaler.load_state_dict(ckpt['scaler'])
             if 'ema' in ckpt and ema is not None:
@@ -566,6 +597,14 @@ def main():
     print(f"\nLogging to {save_dir}\n")
 
     for epoch in range(start_epoch, args.epochs):
+        # 打印 epoch 信息和当前学习率
+        current_lr = optimizer.param_groups[0]['lr']
+        if epoch < args.warmup_epochs:
+            epoch_color = 'bright_yellow'  # Warmup 阶段用黄色
+        else:
+            epoch_color = 'bright_cyan'    # 正常训练用青色
+        print(f'\n{colorstr(epoch_color, "bold", f"Epoch {epoch}/{args.epochs-1}")} | LR: {current_lr:.2e}')
+
         # 训练
         train_loss, train_components = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch,
@@ -581,24 +620,31 @@ def main():
             compute_metrics=compute_metrics, save_dir=save_dir, plot_samples=args.plot_samples
         )
 
-        scheduler.step()
+        # 更新学习率调度
+        current_val_loss = val_metrics['val_loss']
+        if epoch < args.warmup_epochs:
+            # Warmup 阶段使用 LambdaLR
+            warmup_scheduler.step()
+            lr_reduced = False
+        else:
+            # Warmup 结束后，由 ReduceLROnPlateau 根据验证损失调整
+            lr_reduced = lr_plateau.step(current_val_loss)
 
         # 记录指标
         metrics_all = {'train_loss': train_loss, **val_metrics}
         plotter.update(epoch, metrics_all)
         plotter.save_metrics_csv()
 
-        # 计算 EMA 平滑验证损失
-        current_val_loss = val_metrics['val_loss']
+        # 计算 EMA 平滑验证损失（current_val_loss 已在上面获取）
         if ema_val_loss is None:
             ema_val_loss = current_val_loss
         else:
             ema_val_loss = ema_alpha * current_val_loss + (1 - ema_alpha) * ema_val_loss
 
         # 打印结果
-        print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {current_val_loss:.4f} (EMA: {ema_val_loss:.4f})")
+        print(f"Train Loss: {train_loss:.4f} | Val Loss: {current_val_loss:.4f} (EMA: {ema_val_loss:.4f})")
         if compute_metrics and 'mAP@0.5' in val_metrics:
-            print(f"Metrics: mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
+            print(f"mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
 
         # 保存最佳模型（基于 EMA 平滑后的 val_loss）
         if ema_val_loss < best_loss:
@@ -615,7 +661,8 @@ def main():
         ckpt = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'scheduler': scheduler.state_dict(),
+            'warmup_scheduler': warmup_scheduler.state_dict(),
+            'lr_plateau': lr_plateau.state_dict(),
             'epoch': epoch,
             'best_loss': best_loss,
             'ema_val_loss': ema_val_loss,
@@ -627,10 +674,16 @@ def main():
             ckpt['ema'] = ema.ema.state_dict()
         torch.save(ckpt, weights_dir / 'last.pt')
 
-        # 早停（基于 EMA 平滑后的 val_loss）
-        if early_stopping.step(ema_val_loss):
-            print("Early stopping triggered")
-            break
+        # 早停检查（基于学习率降低次数）
+        if early_stopping:
+            should_stop = early_stopping.step(
+                ema_val_loss,
+                lr_reduced=lr_reduced,
+                num_lr_reductions=lr_plateau.num_lr_reductions
+            )
+            if should_stop:
+                print(colorstr('red', 'bold', '\nEarly stopping triggered!'))
+                break
 
     plotter.plot_training_curves()
     print(f"\nTraining complete. Results saved to {save_dir}")

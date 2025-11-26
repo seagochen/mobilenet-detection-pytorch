@@ -217,6 +217,10 @@ class YOLOLoss(nn.Module):
         # Key: (anchor_idx, gy, gx), Value: (iou, gt_idx)
         assignments = {}
 
+        # IoU threshold for multi-anchor matching
+        # Anchors with IoU > threshold will all be assigned as positive samples
+        iou_threshold = 0.5
+
         for i in range(len(gt_boxes)):
             gx, gy = gt_grid_x[i].item(), gt_grid_y[i].item()
 
@@ -229,14 +233,22 @@ class YOLOLoss(nn.Module):
                 cell_anchors
             ).squeeze(0)  # [num_anchors]
 
-            # Assign to anchor with highest IoU
-            best_anchor = ious.argmax().item()
-            best_iou = ious[best_anchor].item()
+            # Multi-anchor matching: assign all anchors with IoU > threshold
+            # If no anchor exceeds threshold, assign the best one (fallback)
+            positive_mask = ious > iou_threshold
+            if positive_mask.sum() == 0:
+                # Fallback: at least assign the best anchor
+                positive_mask[ious.argmax()] = True
 
-            key = (best_anchor, gy, gx)
-            # Only update if this GT has higher IoU than existing assignment
-            if key not in assignments or best_iou > assignments[key][0]:
-                assignments[key] = (best_iou, i)
+            # Assign all positive anchors
+            for anchor_idx in positive_mask.nonzero(as_tuple=True)[0]:
+                anchor_idx = anchor_idx.item()
+                iou_val = ious[anchor_idx].item()
+
+                key = (anchor_idx, gy, gx)
+                # Only update if this GT has higher IoU than existing assignment
+                if key not in assignments or iou_val > assignments[key][0]:
+                    assignments[key] = (iou_val, i)
 
         # Build output tensors from assignments
         assigned_mask = torch.zeros(num_anchors, h, w, dtype=torch.bool, device=device)
