@@ -16,8 +16,8 @@ from mobilenet_ssdlite.utils.visualize import visualize_detections
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run MobileNet-YOLO inference')
-    parser.add_argument('--config', type=str, default='configs/default.yaml',
-                        help='Path to config file')
+    parser.add_argument('--config', type=str, required=True,
+                        help='Path to data.yaml config file')
     parser.add_argument('--checkpoint', type=str, required=True,
                         help='Path to model checkpoint')
     parser.add_argument('--source', type=str, required=True,
@@ -259,7 +259,14 @@ def main():
     print("Loading model...")
     model = MobileNetDetector(config)
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Support both 'model' (train.py format) and 'model_state_dict' (legacy format)
+    if 'model' in checkpoint:
+        model.load_state_dict(checkpoint['model'])
+    elif 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        # Assume checkpoint is the state_dict itself
+        model.load_state_dict(checkpoint)
     model = model.to(device)
     model.eval()
     print("Model loaded successfully!")
