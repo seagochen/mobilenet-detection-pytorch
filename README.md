@@ -31,36 +31,6 @@ Post-processing (NMS)
     ↓
 Final Detections
 ```
-
-## Project Structure
-
-```
-mobilenet-detection/
-├── mobilenet_ssdlite/         # Main package
-│   ├── __init__.py
-│   ├── models/                # Model architecture
-│   │   ├── __init__.py
-│   │   ├── mobilenet_yolo.py # Main model
-│   │   ├── backbone.py       # MobileNet backbone
-│   │   ├── detection_head.py # Detection head
-│   │   └── loss.py           # Loss functions
-│   └── utils/                 # Utilities
-│       ├── __init__.py
-│       ├── dataset.py        # Dataset classes (YOLO format)
-│       ├── transforms.py     # Data augmentation
-│       ├── metrics.py        # Evaluation metrics (mAP, etc.)
-│       ├── plots.py          # Training visualization
-│       ├── callbacks.py      # Training callbacks (EMA, early stopping, etc.)
-│       ├── general.py        # General utilities
-│       └── visualize.py      # Detection visualization
-├── scripts/                   # Training and inference scripts
-│   ├── train.py              # Training script
-│   └── detect.py             # Inference script
-├── runs/                      # Training outputs (created during training)
-│   └── train/                # Experiment directories
-└── setup.py                   # Package setup
-```
-
 ## Installation
 
 ### Requirements

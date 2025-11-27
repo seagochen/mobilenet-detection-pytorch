@@ -1,9 +1,11 @@
 """
-YOLO-style Detection Head for MobileNet backbone
+YOLO-style Detection Head for MobileNet backbone.
+Uses shared box codec for consistent decoding.
 """
 import torch
 import torch.nn as nn
-import numpy as np
+
+from .box_codec import YOLOBoxCodec
 
 
 class DetectionHead(nn.Module):
@@ -141,7 +143,8 @@ class YOLODecoder:
 
     def decode_predictions(self, predictions, anchor_boxes):
         """
-        Decode YOLO predictions to absolute bounding boxes
+        Decode YOLO predictions to absolute bounding boxes.
+        Uses shared YOLOBoxCodec for consistent decoding with loss computation.
 
         Args:
             predictions: List of prediction tensors for each scale
@@ -149,9 +152,9 @@ class YOLODecoder:
             anchor_boxes: List of anchor tensors for each scale
 
         Returns:
-            boxes: List of decoded boxes [B, num_anchors*H*W, 4] (x1, y1, x2, y2)
-            scores: List of objectness scores [B, num_anchors*H*W]
-            class_probs: List of class probabilities [B, num_anchors*H*W, num_classes]
+            boxes: Decoded boxes [B, total_anchors, 4] (x1, y1, x2, y2)
+            scores: Objectness scores [B, total_anchors]
+            class_probs: Class probabilities [B, total_anchors, num_classes]
         """
         all_boxes = []
         all_scores = []
@@ -165,33 +168,11 @@ class YOLODecoder:
             obj_pred = pred[..., 4:5]  # [B, num_anchors, H, W, 1]
             cls_pred = pred[..., 5:]  # [B, num_anchors, H, W, num_classes]
 
-            # Decode box coordinates
-            # tx, ty: offset from grid cell
-            # tw, th: log-space offset from anchor
-            anchors = anchors.unsqueeze(0)  # [1, num_anchors, H, W, 4]
+            # Expand anchors for batch dimension
+            anchors_expanded = anchors.unsqueeze(0)  # [1, num_anchors, H, W, 4]
 
-            # Get anchor centers and sizes
-            anchor_cx = anchors[..., 0]
-            anchor_cy = anchors[..., 1]
-            anchor_w = anchors[..., 2]
-            anchor_h = anchors[..., 3]
-
-            # Decode center coordinates
-            pred_cx = (torch.sigmoid(box_pred[..., 0]) - 0.5) * 2 * stride + anchor_cx
-            pred_cy = (torch.sigmoid(box_pred[..., 1]) - 0.5) * 2 * stride + anchor_cy
-
-            # Decode width and height using YOLOv5/v8 style: (sigmoid(x)*2)^2
-            # This is more stable than exp() and prevents gradient explosion
-            pred_w = (torch.sigmoid(box_pred[..., 2]) * 2) ** 2 * anchor_w
-            pred_h = (torch.sigmoid(box_pred[..., 3]) * 2) ** 2 * anchor_h
-
-            # Convert to (x1, y1, x2, y2)
-            x1 = pred_cx - pred_w / 2
-            y1 = pred_cy - pred_h / 2
-            x2 = pred_cx + pred_w / 2
-            y2 = pred_cy + pred_h / 2
-
-            boxes = torch.stack([x1, y1, x2, y2], dim=-1)
+            # Decode boxes using shared codec
+            boxes = YOLOBoxCodec.decode(box_pred, anchors_expanded, stride)
 
             # Objectness scores
             scores = torch.sigmoid(obj_pred)

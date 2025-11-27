@@ -1,13 +1,15 @@
 """
-General utility functions
-通用工具函数
+General utility functions.
+Provides file operations, seeding, and terminal utilities.
 """
 
 import torch
-import torchvision
 import numpy as np
 from typing import List, Dict, Tuple
 from pathlib import Path
+
+# Re-export box operations from box_ops for backward compatibility
+from .box_ops import box_iou_single as box_iou, nms as _nms_tensor
 
 
 def nms(
@@ -15,75 +17,28 @@ def nms(
     iou_threshold: float = 0.5
 ) -> List[Dict]:
     """
-    非极大值抑制 (NMS) - 优化版 (使用 torchvision.ops.nms)
+    Non-Maximum Suppression for detection results.
 
     Args:
-        detections: 检测结果列表，每个dict包含 'class_id', 'confidence', 'bbox'
-        iou_threshold: IoU阈值
+        detections: List of detection dicts with 'class_id', 'confidence', 'bbox'
+        iou_threshold: IoU threshold for suppression
 
     Returns:
-        filtered: NMS后的检测结果
+        filtered: Filtered detection results after NMS
     """
     if len(detections) == 0:
         return []
 
-    # 提取数据构建 Tensor
-    boxes = []
-    scores = []
-    class_ids = []
+    # Extract data to tensors
+    boxes = torch.tensor([det['bbox'] for det in detections], dtype=torch.float32)
+    scores = torch.tensor([det['confidence'] for det in detections], dtype=torch.float32)
+    class_ids = torch.tensor([det['class_id'] for det in detections], dtype=torch.int64)
 
-    for det in detections:
-        x1, y1, x2, y2 = det['bbox']
-        boxes.append([x1, y1, x2, y2])
-        scores.append(det['confidence'])
-        class_ids.append(det['class_id'])
+    # Apply NMS using box_ops
+    keep_indices = _nms_tensor(boxes, scores, iou_threshold, class_ids)
 
-    boxes_t = torch.tensor(boxes, device='cpu', dtype=torch.float32)
-    scores_t = torch.tensor(scores, device='cpu', dtype=torch.float32)
-    class_ids_t = torch.tensor(class_ids, device='cpu', dtype=torch.int64)
-
-    # 为了对不同类别分别做NMS，使用坐标偏移技巧
-    max_coordinate = boxes_t.max() + 5000
-    offsets = class_ids_t.float() * max_coordinate
-    boxes_for_nms = boxes_t + offsets[:, None]
-
-    # 使用 torchvision 的优化 NMS
-    keep_indices = torchvision.ops.nms(boxes_for_nms, scores_t, iou_threshold)
-
-    # 重建结果列表
-    filtered = [detections[idx] for idx in keep_indices.numpy()]
-
-    return filtered
-
-
-def box_iou(box1: Tuple, box2: Tuple) -> float:
-    """
-    计算两个框的IoU
-
-    Args:
-        box1, box2: (x1, y1, x2, y2)
-
-    Returns:
-        iou: IoU值
-    """
-    x1_1, y1_1, x2_1, y2_1 = box1
-    x1_2, y1_2, x2_2, y2_2 = box2
-
-    # 交集
-    x1_inter = max(x1_1, x1_2)
-    y1_inter = max(y1_1, y1_2)
-    x2_inter = min(x2_1, x2_2)
-    y2_inter = min(y2_1, y2_2)
-
-    inter_area = max(0, x2_inter - x1_inter) * max(0, y2_inter - y1_inter)
-
-    # 并集
-    box1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
-    box2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
-    union_area = box1_area + box2_area - inter_area
-
-    iou = inter_area / (union_area + 1e-16)
-    return iou
+    # Rebuild result list
+    return [detections[idx] for idx in keep_indices.numpy()]
 
 
 def check_img_size(img_size: int, stride: int = 32) -> int:

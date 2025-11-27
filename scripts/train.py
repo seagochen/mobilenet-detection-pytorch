@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from mobilenet_ssdlite.models import MobileNetDetector
-from mobilenet_ssdlite.models.loss import YOLOLoss
+from mobilenet_ssdlite.models.loss import DetectionLoss
 from mobilenet_ssdlite.utils import DetectionDataset, YOLODataset, collate_fn, get_transforms
 
 # 引入从 YOLOv2 移植过来的工具类
@@ -535,7 +535,7 @@ def main():
     )
 
     # 损失函数
-    criterion = YOLOLoss(
+    criterion = DetectionLoss(
         config['model']['num_classes'],
         model.anchor_generator,
         model.strides,

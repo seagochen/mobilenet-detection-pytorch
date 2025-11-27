@@ -1,17 +1,213 @@
 """
-Plotting utilities for training visualization
-绘制训练曲线、混淆矩阵、PR曲线等
+Unified visualization utilities for object detection.
+Includes training curves, detection visualization, and evaluation plots.
 """
 
-import os
 import cv2
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # 非GUI后端
+matplotlib.use('Agg')  # Non-GUI backend
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 import seaborn as sns
+import torch
+
+from .image import denormalize_to_uint8
+
+
+# =============================================================================
+# Color Palette
+# =============================================================================
+
+def get_color_palette(n_colors: int = 80) -> List[tuple]:
+    """
+    Generate a color palette for visualization.
+
+    Args:
+        n_colors: Number of colors needed
+
+    Returns:
+        List of (R, G, B) tuples
+    """
+    colors = [
+        (255, 56, 56),    # red
+        (255, 157, 151),  # light red
+        (255, 112, 31),   # orange
+        (255, 178, 29),   # yellow-orange
+        (207, 210, 49),   # yellow-green
+        (72, 249, 10),    # green
+        (146, 204, 23),   # grass green
+        (61, 219, 134),   # cyan-green
+        (26, 147, 52),    # dark green
+        (0, 212, 187),    # cyan
+        (44, 153, 168),   # dark cyan
+        (0, 194, 255),    # sky blue
+        (52, 69, 147),    # dark blue
+        (100, 115, 255),  # blue-purple
+        (0, 24, 236),     # blue
+        (132, 56, 255),   # purple
+        (82, 0, 133),     # dark purple
+        (203, 56, 255),   # pink-purple
+        (255, 149, 200),  # pink
+        (255, 55, 199),   # magenta
+    ]
+    # Extend if more colors needed
+    while len(colors) < n_colors:
+        colors = colors + colors
+    return colors[:n_colors]
+
+
+# =============================================================================
+# Detection Visualization
+# =============================================================================
+
+def visualize_detections(
+    image: Union[np.ndarray, torch.Tensor],
+    detections: Dict,
+    class_names: List[str],
+    confidence_threshold: float = 0.5,
+    save_path: Optional[str] = None
+) -> np.ndarray:
+    """
+    Visualize detection results on image.
+
+    Args:
+        image: Input image [H, W, 3] numpy array or [3, H, W] tensor
+        detections: Dict with 'boxes', 'scores', 'labels'
+        class_names: List of class names
+        confidence_threshold: Confidence threshold for display
+        save_path: Path to save visualization (optional)
+
+    Returns:
+        vis_image: Visualization image as numpy array (BGR)
+    """
+    # Convert tensor to numpy if needed
+    if isinstance(image, torch.Tensor):
+        image = image.permute(1, 2, 0).cpu().numpy()
+        # Denormalize if values are in normalized range
+        if image.min() < 0 or image.max() <= 1:
+            image = denormalize_to_uint8(image)
+        else:
+            image = (image * 255).astype(np.uint8)
+    else:
+        image = image.copy()
+        if image.dtype != np.uint8:
+            if image.max() <= 1:
+                image = (image * 255).astype(np.uint8)
+            else:
+                image = image.astype(np.uint8)
+
+    # Ensure image is in BGR for OpenCV
+    if len(image.shape) == 3 and image.shape[2] == 3:
+        vis_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    else:
+        vis_image = image.copy()
+
+    boxes = detections['boxes']
+    scores = detections['scores']
+    labels = detections['labels']
+
+    # Filter by confidence
+    if isinstance(scores, torch.Tensor):
+        mask = scores > confidence_threshold
+        boxes = boxes[mask].cpu().numpy()
+        scores = scores[mask].cpu().numpy()
+        labels = labels[mask].cpu().numpy()
+    else:
+        mask = scores > confidence_threshold
+        boxes = boxes[mask]
+        scores = scores[mask]
+        labels = labels[mask]
+
+    # Get colors
+    colors = get_color_palette(len(class_names))
+
+    # Draw boxes
+    for box, score, label in zip(boxes, scores, labels):
+        x1, y1, x2, y2 = box.astype(int)
+        label_idx = int(label)
+        color = colors[label_idx % len(colors)]
+
+        # Draw box
+        cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)
+
+        # Draw label
+        label_text = f"{class_names[label_idx]}: {score:.2f}"
+        (text_w, text_h), _ = cv2.getTextSize(
+            label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+        )
+        cv2.rectangle(
+            vis_image, (x1, y1 - text_h - 4), (x1 + text_w, y1), color, -1
+        )
+        cv2.putText(
+            vis_image, label_text, (x1, y1 - 2),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1
+        )
+
+    if save_path:
+        cv2.imwrite(save_path, vis_image)
+
+    return vis_image
+
+
+def plot_training_curves_simple(history: Dict, save_path: Optional[str] = None):
+    """
+    Plot training curves (simple standalone function).
+
+    Args:
+        history: Dict with loss history (keys: total_loss, box_loss, obj_loss, cls_loss)
+        save_path: Path to save plot (optional)
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    # Total loss
+    if 'total_loss' in history:
+        axes[0, 0].plot(history['total_loss'], label='Train')
+    if 'val_total_loss' in history:
+        axes[0, 0].plot(history['val_total_loss'], label='Val')
+    axes[0, 0].set_title('Total Loss')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
+
+    # Box loss
+    if 'box_loss' in history:
+        axes[0, 1].plot(history['box_loss'], label='Train')
+    axes[0, 1].set_title('Box Loss')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_ylabel('Loss')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
+
+    # Objectness loss
+    if 'obj_loss' in history:
+        axes[1, 0].plot(history['obj_loss'], label='Train')
+    axes[1, 0].set_title('Objectness Loss')
+    axes[1, 0].set_xlabel('Epoch')
+    axes[1, 0].set_ylabel('Loss')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True)
+
+    # Class loss
+    if 'cls_loss' in history:
+        axes[1, 1].plot(history['cls_loss'], label='Train')
+    axes[1, 1].set_title('Classification Loss')
+    axes[1, 1].set_xlabel('Epoch')
+    axes[1, 1].set_ylabel('Loss')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path)
+    plt.close()
+
+
+# Legacy alias
+_get_color_palette = get_color_palette
 
 
 class TrainingPlotter:
@@ -281,14 +477,18 @@ def plot_detection_samples(
 
         # 获取图像
         img = images[idx].copy()
+
+        # 转换为HWC格式（如果需要）
+        if len(img.shape) == 3 and img.shape[0] == 3:  # CHW格式
+            img = img.transpose(1, 2, 0)
+
+        # 反归一化并转换为 uint8
         if img.dtype == np.float32 or img.dtype == np.float64:
-            img = (img * 255).astype(np.uint8)
+            img = denormalize_to_uint8(img)
 
         # 转换为RGB（如果需要）
         if len(img.shape) == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        elif img.shape[0] == 3:  # CHW格式
-            img = img.transpose(1, 2, 0)
 
         # 确保数组是连续的（OpenCV要求）
         img = np.ascontiguousarray(img)

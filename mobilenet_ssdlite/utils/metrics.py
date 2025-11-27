@@ -1,41 +1,13 @@
 """
-Evaluation metrics for object detection
-计算mAP、Precision、Recall等评估指标
+Evaluation metrics for object detection.
+Computes mAP, Precision, Recall, and related metrics.
 """
 
 import numpy as np
 import torch
 from typing import List, Dict, Tuple
-from collections import defaultdict
 
-
-def box_iou_batch(box1: np.ndarray, box2: np.ndarray) -> np.ndarray:
-    """
-    计算批量框的IoU
-
-    Args:
-        box1: (N, 4) [x1, y1, x2, y2]
-        box2: (M, 4) [x1, y1, x2, y2]
-
-    Returns:
-        iou: (N, M) IoU矩阵
-    """
-    area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])
-    area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])
-
-    # 计算交集
-    x1 = np.maximum(box1[:, 0][:, None], box2[:, 0][None, :])
-    y1 = np.maximum(box1[:, 1][:, None], box2[:, 1][None, :])
-    x2 = np.minimum(box1[:, 2][:, None], box2[:, 2][None, :])
-    y2 = np.minimum(box1[:, 3][:, None], box2[:, 3][None, :])
-
-    inter_area = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
-
-    # 计算并集
-    union_area = area1[:, None] + area2[None, :] - inter_area
-
-    iou = inter_area / (union_area + 1e-16)
-    return iou
+from .box_ops import box_iou_numpy as box_iou_batch
 
 
 def ap_per_class(

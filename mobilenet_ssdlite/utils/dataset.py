@@ -12,8 +12,8 @@ from torch.utils.data import Dataset
 from PIL import Image
 from pathlib import Path
 
-IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+from .image import get_normalize_params
+from .path_utils import resolve_split_path, infer_label_dir
 
 
 class DetectionDataset(Dataset):
@@ -34,8 +34,7 @@ class DetectionDataset(Dataset):
         self.transforms = transforms
         self.img_size = img_size
         # Keep normalization tensors on CPU; dataloader moves images later
-        self.mean = IMAGENET_MEAN
-        self.std = IMAGENET_STD
+        self.mean, self.std = get_normalize_params('torch')
 
         # Load annotations
         self.annotations = []
@@ -182,8 +181,7 @@ class YOLODataset(Dataset):
         self.transforms = transforms
         self.img_size = img_size
         self.split = split
-        self.mean = IMAGENET_MEAN
-        self.std = IMAGENET_STD
+        self.mean, self.std = get_normalize_params('torch')
 
         # Load YAML config
         yaml_path = Path(yaml_path).resolve()
@@ -207,67 +205,17 @@ class YOLODataset(Dataset):
         if split_path is None:
             raise ValueError(f"Split '{split}' not found in YAML config")
 
-        # Resolve the image directory path
-        # Handle both absolute and relative paths (including ../train/images style)
-        self.img_dir = self._resolve_split_path(split_path)
+        # Resolve the image directory path using shared utility
+        self.img_dir = resolve_split_path(self.root, split_path)
 
-        # Infer label directory (typically same structure but 'images' -> 'labels')
-        self.label_dir = self._infer_label_dir(self.img_dir)
+        # Infer label directory using shared utility
+        self.label_dir = infer_label_dir(self.img_dir)
 
         # Load image paths
         self.images = []
         self._load_image_paths()
 
         print(f"Loaded {len(self.images)} images from {self.img_dir}")
-
-    def _resolve_split_path(self, split_path):
-        """
-        Resolve split path to actual directory.
-        Supports multiple Ultralytics/Roboflow dataset formats:
-        - Absolute paths
-        - Relative paths from root (e.g., 'train/images')
-        - Relative paths from yaml (e.g., '../train/images')
-        """
-        split_path = Path(split_path)
-
-        # Try different resolution strategies
-        candidates = [
-            # 1. Relative to root path
-            self.root / split_path,
-            # 2. Relative to yaml file (handles '../train/images' style)
-            (self.root / split_path).resolve(),
-        ]
-
-        # 3. If path has '..' prefix, also try stripping it for Roboflow format
-        # e.g., '../train/images' -> 'train/images' relative to yaml dir
-        path_str = str(split_path)
-        if path_str.startswith('..'):
-            # Remove leading '../' and resolve from yaml parent
-            clean_path = Path(path_str.lstrip('./').lstrip('..').lstrip('/'))
-            candidates.append(self.root / clean_path)
-
-        for candidate in candidates:
-            resolved = candidate.resolve()
-            if resolved.exists() and resolved.is_dir():
-                return resolved
-
-        # If none found, return the default (will raise error later)
-        return (self.root / split_path).resolve()
-
-    def _infer_label_dir(self, img_dir):
-        """
-        Infer label directory from image directory.
-        Supports both 'images/train' -> 'labels/train' and 'train/images' -> 'train/labels'
-        """
-        img_dir_str = str(img_dir)
-
-        if 'images' in img_dir_str:
-            label_dir = Path(img_dir_str.replace('images', 'labels'))
-            if label_dir.exists():
-                return label_dir
-
-        # Fallback: parallel directory structure
-        return img_dir.parent / 'labels'
 
     def _load_image_paths(self):
         """Load all image paths from the image directory"""

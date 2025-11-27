@@ -1,48 +1,14 @@
 """
-Anchor clustering utilities for object detection
-使用 K-Means 聚类计算最优 anchor 尺寸
+Anchor clustering utilities for object detection.
+Uses K-Means clustering to compute optimal anchor sizes.
 """
 import numpy as np
 import yaml
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-
-def _resolve_split_path(root: Path, split_path: str) -> Path:
-    """
-    Resolve split path to actual directory.
-    Supports multiple Ultralytics/Roboflow dataset formats.
-    """
-    split_path_obj = Path(split_path)
-
-    candidates = [
-        root / split_path_obj,
-        (root / split_path_obj).resolve(),
-    ]
-
-    path_str = str(split_path)
-    if path_str.startswith('..'):
-        clean_path = Path(path_str.lstrip('./').lstrip('..').lstrip('/'))
-        candidates.append(root / clean_path)
-
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved.exists() and resolved.is_dir():
-            return resolved
-
-    return (root / split_path_obj).resolve()
-
-
-def _infer_label_dir(img_dir: Path) -> Path:
-    """Infer label directory from image directory."""
-    img_dir_str = str(img_dir)
-
-    if 'images' in img_dir_str:
-        label_dir = Path(img_dir_str.replace('images', 'labels'))
-        if label_dir.exists():
-            return label_dir
-
-    return img_dir.parent / 'labels'
+from .path_utils import resolve_split_path, infer_label_dir
+from .box_ops import box_iou_wh
 
 
 def load_boxes_from_yolo_dataset(yaml_path: str, split: str = 'train', img_size: int = 640) -> np.ndarray:
@@ -70,8 +36,8 @@ def load_boxes_from_yolo_dataset(yaml_path: str, split: str = 'train', img_size:
     if split_path is None:
         raise ValueError(f"Split '{split}' not found in YAML config")
 
-    img_dir = _resolve_split_path(root, split_path)
-    label_dir = _infer_label_dir(img_dir)
+    img_dir = resolve_split_path(root, split_path)
+    label_dir = infer_label_dir(img_dir)
 
     if not label_dir.exists():
         raise ValueError(f"Label directory does not exist: {label_dir}")
@@ -158,39 +124,6 @@ def kmeans_anchors(
     centroids = centroids[sorted_indices]
 
     return centroids
-
-
-def box_iou_wh(boxes_wh: np.ndarray, anchors_wh: np.ndarray) -> np.ndarray:
-    """
-    计算框和 anchor 之间的 IoU（假设中心点重合）
-
-    Args:
-        boxes_wh: (N, 2) 框的宽高
-        anchors_wh: (K, 2) anchor 的宽高
-
-    Returns:
-        iou: (N, K) IoU 矩阵
-    """
-    N = len(boxes_wh)
-    K = len(anchors_wh)
-
-    # 扩展维度以便广播
-    boxes = boxes_wh[:, np.newaxis, :]  # (N, 1, 2)
-    anchors = anchors_wh[np.newaxis, :, :]  # (1, K, 2)
-
-    # 计算交集（假设中心重合）
-    inter_w = np.minimum(boxes[..., 0], anchors[..., 0])
-    inter_h = np.minimum(boxes[..., 1], anchors[..., 1])
-    inter_area = inter_w * inter_h
-
-    # 计算并集
-    boxes_area = boxes[..., 0] * boxes[..., 1]
-    anchors_area = anchors[..., 0] * anchors[..., 1]
-    union_area = boxes_area + anchors_area - inter_area
-
-    iou = inter_area / (union_area + 1e-16)
-
-    return iou
 
 
 def compute_anchors_for_dataset(

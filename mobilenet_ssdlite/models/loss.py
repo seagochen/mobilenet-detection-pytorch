@@ -1,83 +1,21 @@
 """
-YOLO Loss Functions for object detection
-Fixed: Separate positive/negative objectness loss to handle class imbalance
-Improved: CIoU loss for better box regression
+Detection Loss Functions for object detection.
+Uses unified box operations and codec from shared modules.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
+
+from mobilenet_ssdlite.utils.box_ops import box_ciou, box_iou, xywh_to_xyxy
+from .box_codec import YOLOBoxCodec
 
 
-def bbox_iou(box1, box2, xywh=False, CIoU=True, eps=1e-7):
+class DetectionLoss(nn.Module):
     """
-    Calculate IoU/CIoU between two sets of boxes.
+    Anchor-based detection loss function.
+    Combines box regression (CIoU), objectness, and classification losses.
 
-    Args:
-        box1: [N, 4] predicted boxes
-        box2: [N, 4] target boxes
-        xywh: if True, boxes are in (cx, cy, w, h) format; else (x1, y1, x2, y2)
-        CIoU: if True, compute Complete IoU; else compute standard IoU
-
-    Returns:
-        iou: [N] IoU/CIoU values
-    """
-    if xywh:
-        # Convert (cx, cy, w, h) to (x1, y1, x2, y2)
-        b1_x1 = box1[:, 0] - box1[:, 2] / 2
-        b1_y1 = box1[:, 1] - box1[:, 3] / 2
-        b1_x2 = box1[:, 0] + box1[:, 2] / 2
-        b1_y2 = box1[:, 1] + box1[:, 3] / 2
-        b2_x1 = box2[:, 0] - box2[:, 2] / 2
-        b2_y1 = box2[:, 1] - box2[:, 3] / 2
-        b2_x2 = box2[:, 0] + box2[:, 2] / 2
-        b2_y2 = box2[:, 1] + box2[:, 3] / 2
-    else:
-        b1_x1, b1_y1, b1_x2, b1_y2 = box1[:, 0], box1[:, 1], box1[:, 2], box1[:, 3]
-        b2_x1, b2_y1, b2_x2, b2_y2 = box2[:, 0], box2[:, 1], box2[:, 2], box2[:, 3]
-
-    # Intersection area
-    inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
-            (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
-
-    # Union area - ensure positive width/height with proper clamping
-    w1 = (b1_x2 - b1_x1).clamp(min=eps)
-    h1 = (b1_y2 - b1_y1).clamp(min=eps)
-    w2 = (b2_x2 - b2_x1).clamp(min=eps)
-    h2 = (b2_y2 - b2_y1).clamp(min=eps)
-    union = w1 * h1 + w2 * h2 - inter + eps
-
-    # IoU
-    iou = inter / union
-
-    if CIoU:
-        # Convex (smallest enclosing box) diagonal squared
-        cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)
-        ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)
-        c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
-
-        # Center distance squared
-        rho2 = ((b1_x1 + b1_x2 - b2_x1 - b2_x2) ** 2 +
-                (b1_y1 + b1_y2 - b2_y1 - b2_y2) ** 2) / 4
-
-        # Aspect ratio consistency - w1, w2, h1, h2 are already clamped to be positive
-        v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
-        with torch.no_grad():
-            alpha = v / (v - iou + 1 + eps)
-
-        # Clamp final CIoU to valid range [-1, 1] for numerical stability
-        ciou = iou - (rho2 / c2 + v * alpha)
-        return ciou.clamp(min=-1.0, max=1.0)
-
-    return iou
-
-
-class YOLOLoss(nn.Module):
-    """
-    YOLO-style loss function
-    Combines box regression, objectness, and classification losses
-
-    Key fix: Separate obj/noobj loss to prevent background overwhelming foreground
+    Key fix: Separate obj/noobj loss to prevent background overwhelming foreground.
     """
 
     def __init__(self, num_classes, anchors, strides, input_size, loss_weights=None, label_smoothing=0.0):
@@ -228,7 +166,7 @@ class YOLOLoss(nn.Module):
                 pred_boxes = self._decode_boxes(pred_offsets, anchor_boxes_cat, stride)
 
                 # Compute CIoU loss with numerical stability
-                ciou = bbox_iou(pred_boxes, gt_boxes_cat, xywh=False, CIoU=True)
+                ciou = box_ciou(pred_boxes, gt_boxes_cat, xywh=False)
 
                 # Safety check for NaN/Inf in CIoU
                 valid_mask = torch.isfinite(ciou)
@@ -424,7 +362,7 @@ class YOLOLoss(nn.Module):
     def _decode_boxes(self, offsets, anchors, stride):
         """
         Decode box predictions from offsets to xyxy coordinates.
-        IMPORTANT: Must match inference decoder logic in detection_head.py
+        Uses shared YOLOBoxCodec to ensure consistency with inference.
 
         Args:
             offsets: [N, 4] raw network outputs (tx, ty, tw, th)
@@ -434,65 +372,20 @@ class YOLOLoss(nn.Module):
         Returns:
             boxes: [N, 4] decoded boxes (x1, y1, x2, y2)
         """
-        # Get anchor parameters
-        anchor_cx = anchors[:, 0]
-        anchor_cy = anchors[:, 1]
-        anchor_w = anchors[:, 2]
-        anchor_h = anchors[:, 3]
-
-        # Decode offsets - MUST match detection_head.py YOLODecoder
-        # Decode center: Apply sigmoid and scale to [-0.5, 1.5] range (YOLOv5 style)
-        pred_cx = (torch.sigmoid(offsets[:, 0]) - 0.5) * 2 * stride + anchor_cx
-        pred_cy = (torch.sigmoid(offsets[:, 1]) - 0.5) * 2 * stride + anchor_cy
-
-        # Decode size using YOLOv5/v8 style: (sigmoid(x)*2)^2
-        # MUST match detection_head.py YOLODecoder exactly
-        pred_w = (torch.sigmoid(offsets[:, 2]) * 2) ** 2 * anchor_w
-        pred_h = (torch.sigmoid(offsets[:, 3]) * 2) ** 2 * anchor_h
-
-        # Convert to xyxy
-        x1 = pred_cx - pred_w / 2
-        y1 = pred_cy - pred_h / 2
-        x2 = pred_cx + pred_w / 2
-        y2 = pred_cy + pred_h / 2
-
-        return torch.stack([x1, y1, x2, y2], dim=-1)
+        return YOLOBoxCodec.decode(offsets, anchors, stride)
 
     @staticmethod
     def _compute_iou(boxes1, boxes2):
         """
-        Compute IoU between boxes
+        Compute IoU between boxes.
 
         Args:
             boxes1: [N, 4] (x1, y1, x2, y2)
-            boxes2: [M, 4] (cx, cy, w, h) or (x1, y1, x2, y2)
+            boxes2: [M, 4] (cx, cy, w, h) - anchors in center format
 
         Returns:
             iou: [N, M]
         """
-        # Convert boxes2 to (x1, y1, x2, y2) if in center format
-        if boxes2.shape[-1] == 4:
-            # Assume (cx, cy, w, h)
-            boxes2_x1 = boxes2[:, 0] - boxes2[:, 2] / 2
-            boxes2_y1 = boxes2[:, 1] - boxes2[:, 3] / 2
-            boxes2_x2 = boxes2[:, 0] + boxes2[:, 2] / 2
-            boxes2_y2 = boxes2[:, 1] + boxes2[:, 3] / 2
-            boxes2_xyxy = torch.stack([boxes2_x1, boxes2_y1, boxes2_x2, boxes2_y2], dim=-1)
-        else:
-            boxes2_xyxy = boxes2
-
-        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        area2 = (boxes2_xyxy[:, 2] - boxes2_xyxy[:, 0]) * (boxes2_xyxy[:, 3] - boxes2_xyxy[:, 1])
-
-        # Intersection
-        lt = torch.max(boxes1[:, None, :2], boxes2_xyxy[:, :2])
-        rb = torch.min(boxes1[:, None, 2:], boxes2_xyxy[:, 2:])
-
-        wh = (rb - lt).clamp(min=0)
-        inter = wh[:, :, 0] * wh[:, :, 1]
-
-        # Union
-        union = area1[:, None] + area2 - inter
-
-        iou = inter / (union + 1e-16)
-        return iou
+        # Convert boxes2 from (cx, cy, w, h) to (x1, y1, x2, y2)
+        boxes2_xyxy = xywh_to_xyxy(boxes2)
+        return box_iou(boxes1, boxes2_xyxy)
