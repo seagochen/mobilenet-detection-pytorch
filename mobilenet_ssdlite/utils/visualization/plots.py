@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Union
 import seaborn as sns
 import torch
 
-from .image import denormalize_to_uint8
+from ..data.image import denormalize_to_uint8
 
 
 # =============================================================================

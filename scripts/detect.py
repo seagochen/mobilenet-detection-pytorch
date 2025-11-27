@@ -3,15 +3,22 @@ Inference script for MobileNet-YOLO
 Run object detection on images or videos
 """
 import os
+import sys
 import argparse
 import yaml
 import torch
 import cv2
 import numpy as np
+from pathlib import Path
 from tqdm import tqdm
 
+# Add project root to path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
 from mobilenet_ssdlite.models import MobileNetDetector
-from mobilenet_ssdlite.utils.visualize import visualize_detections
+from mobilenet_ssdlite.utils import visualize_detections
 
 
 def parse_args():

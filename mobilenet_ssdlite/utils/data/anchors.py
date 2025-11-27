@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 from .path_utils import resolve_split_path, infer_label_dir
-from .box_ops import box_iou_wh
+from ..ops.box_ops import box_iou_wh
 
 
 def load_boxes_from_yolo_dataset(yaml_path: str, split: str = 'train', img_size: int = 640) -> np.ndarray:

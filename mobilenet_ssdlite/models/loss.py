@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mobilenet_ssdlite.utils.box_ops import box_ciou, box_iou, xywh_to_xyxy
+from mobilenet_ssdlite.utils import box_ciou, box_iou, xywh_to_xyxy
 from .box_codec import YOLOBoxCodec
 
 

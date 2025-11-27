@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from typing import List, Dict, Tuple
 
-from .box_ops import box_iou_numpy as box_iou_batch
+from ..ops.box_ops import box_iou_numpy as box_iou_batch
 
 
 def ap_per_class(
