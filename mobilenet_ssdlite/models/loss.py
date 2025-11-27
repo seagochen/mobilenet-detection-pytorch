@@ -95,11 +95,13 @@ class YOLOLoss(nn.Module):
         self.label_smoothing = label_smoothing
 
         # Loss weights
+        # Updated weights: increase box weight since CIoU values are typically smaller
+        # Increase obj weight to force model to learn background suppression
         if loss_weights is None:
             loss_weights = {'box': 0.05, 'obj': 1.0, 'cls': 0.5}
-        self.box_weight = loss_weights['box']
-        self.obj_weight = loss_weights['obj']
-        self.cls_weight = loss_weights['cls']
+        self.box_weight = loss_weights.get('box', 0.05) * 3.0  # 0.15 default
+        self.obj_weight = loss_weights.get('obj', 1.0) * 5.0   # 5.0 default
+        self.cls_weight = loss_weights.get('cls', 0.5)
 
         # NoObj weight: reduce background loss contribution to prevent
         # the massive number of negative samples from dominating training
@@ -421,19 +423,14 @@ class YOLOLoss(nn.Module):
         anchor_h = anchors[:, 3]
 
         # Decode offsets - MUST match detection_head.py YOLODecoder
-        # Apply sigmoid to tx, ty and scale to [-0.5, 1.5] range (YOLOv5 style)
-        tx = torch.sigmoid(offsets[:, 0])
-        ty = torch.sigmoid(offsets[:, 1])
-        tw = offsets[:, 2]
-        th = offsets[:, 3]
+        # Decode center: Apply sigmoid and scale to [-0.5, 1.5] range (YOLOv5 style)
+        pred_cx = (torch.sigmoid(offsets[:, 0]) - 0.5) * 2 * stride + anchor_cx
+        pred_cy = (torch.sigmoid(offsets[:, 1]) - 0.5) * 2 * stride + anchor_cy
 
-        # Predicted center: (sigmoid(tx) - 0.5) * 2 * stride + anchor_cx
-        pred_cx = (tx - 0.5) * 2 * stride + anchor_cx
-        pred_cy = (ty - 0.5) * 2 * stride + anchor_cy
-
-        # Predicted size: exp(tw) * anchor_w
-        pred_w = torch.exp(tw.clamp(max=10)) * anchor_w  # clamp to prevent overflow
-        pred_h = torch.exp(th.clamp(max=10)) * anchor_h
+        # Decode size using YOLOv5/v8 style: (sigmoid(x)*2)^2
+        # MUST match detection_head.py YOLODecoder exactly
+        pred_w = (torch.sigmoid(offsets[:, 2]) * 2) ** 2 * anchor_w
+        pred_h = (torch.sigmoid(offsets[:, 3]) * 2) ** 2 * anchor_h
 
         # Convert to xyxy
         x1 = pred_cx - pred_w / 2

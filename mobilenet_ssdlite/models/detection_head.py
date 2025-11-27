@@ -180,9 +180,10 @@ class YOLODecoder:
             pred_cx = (torch.sigmoid(box_pred[..., 0]) - 0.5) * 2 * stride + anchor_cx
             pred_cy = (torch.sigmoid(box_pred[..., 1]) - 0.5) * 2 * stride + anchor_cy
 
-            # Decode width and height
-            pred_w = torch.exp(box_pred[..., 2]) * anchor_w
-            pred_h = torch.exp(box_pred[..., 3]) * anchor_h
+            # Decode width and height using YOLOv5/v8 style: (sigmoid(x)*2)^2
+            # This is more stable than exp() and prevents gradient explosion
+            pred_w = (torch.sigmoid(box_pred[..., 2]) * 2) ** 2 * anchor_w
+            pred_h = (torch.sigmoid(box_pred[..., 3]) * 2) ** 2 * anchor_h
 
             # Convert to (x1, y1, x2, y2)
             x1 = pred_cx - pred_w / 2
