@@ -37,14 +37,13 @@ class DetectionLoss(nn.Module):
         self.label_smoothing = label_smoothing
 
         # Loss weights
-        # NOTE: use values from the config as-is to avoid double scaling.
-        # The previous version multiplied user-supplied weights (e.g., lambda_box=7.5)
-        # which unintentionally blew up the box loss and caused noisy training.
+        # With all losses normalized by num_pos, they have similar magnitudes
+        # so balanced weights (1.0, 1.0, 1.0) work well
         if loss_weights is None:
-            loss_weights = {'box': 0.15, 'obj': 1.0, 'cls': 0.5}
-        self.box_weight = loss_weights.get('box', 0.15)
+            loss_weights = {'box': 1.0, 'obj': 1.0, 'cls': 1.0}
+        self.box_weight = loss_weights.get('box', 1.0)
         self.obj_weight = loss_weights.get('obj', 1.0)
-        self.cls_weight = loss_weights.get('cls', 0.5)
+        self.cls_weight = loss_weights.get('cls', 1.0)
 
         # NoObj weight: reduce background loss contribution to prevent
         # the massive number of negative samples from dominating training
@@ -74,17 +73,22 @@ class DetectionLoss(nn.Module):
         dtype = predictions[0].dtype
         batch_size = predictions[0].size(0)
 
-        # Use zeros that can accumulate gradients
-        total_box_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
-        total_obj_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
-        total_cls_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
-        total_num_pos = 0
+        # Global accumulators for loss sums (not means)
+        # This allows proper normalization at the end
+        loss_items = {
+            'box_sum': torch.zeros(1, device=device, dtype=dtype).squeeze(),
+            'obj_sum': torch.zeros(1, device=device, dtype=dtype).squeeze(),
+            'cls_sum': torch.zeros(1, device=device, dtype=dtype).squeeze(),
+            'num_pos': 0,
+            'num_anchors': 0,
+        }
 
         # Process each scale
         for scale_idx, (pred, anchor_boxes, stride) in enumerate(
             zip(predictions, anchors, self.strides)
         ):
             _, num_anchors, h, w, num_outputs = pred.shape
+            loss_items['num_anchors'] += batch_size * num_anchors * h * w
 
             # Split predictions
             box_pred = pred[..., :4]  # [B, num_anchors, H, W, 4]
@@ -132,7 +136,7 @@ class DetectionLoss(nn.Module):
                             anchor_idx[2][i].item()
                         ))
 
-                    # Objectness target
+                    # Objectness target (will be updated to IoU later)
                     obj_target[batch_idx][anchor_idx] = 1.0
 
                     # Class targets (one-hot with optional label smoothing)
@@ -150,6 +154,7 @@ class DetectionLoss(nn.Module):
             pos_mask = obj_target > 0
             neg_mask = ~pos_mask
             num_pos = pos_mask.sum().item()
+            loss_items['num_pos'] += num_pos
 
             # Box loss using CIoU (only for positive samples)
             if num_pos > 0 and len(all_gt_boxes) > 0:
@@ -169,51 +174,45 @@ class DetectionLoss(nn.Module):
                 # Compute CIoU loss with numerical stability
                 ciou = box_ciou(pred_boxes, gt_boxes_cat, xywh=False)
 
-                # Safety check for NaN/Inf in CIoU
-                valid_mask = torch.isfinite(ciou)
-                if valid_mask.sum() > 0:
-                    box_loss = (1.0 - ciou[valid_mask]).mean()
-                    total_box_loss += box_loss
-                    total_num_pos += valid_mask.sum().item()
-                else:
-                    # All CIoU values are invalid, skip this scale
-                    pass
+                # === IoU-Aware Objectness ===
+                # Update objectness target to be CIoU value instead of hard 1.0
+                # This teaches the model: "better box prediction = higher confidence"
+                # Key technique from YOLOv5/v7/v8 for aligning classification with localization
+                ciou_detached = ciou.detach().clamp(0, 1)
+                for k, (b, a, gy, gx) in enumerate(all_pos_indices):
+                    obj_target[b, a, gy, gx] = ciou_detached[k]
 
-            # === Objectness Loss with proper weighting ===
-            # Use weighted BCE to handle class imbalance between pos/neg samples
-            # This ensures proper gradient balance regardless of pos/neg ratio
+                # Accumulate box loss (sum, not mean)
+                loss_items['box_sum'] = loss_items['box_sum'] + (1.0 - ciou).sum()
 
-            # Create weight mask: positive samples get weight 1.0, negative get noobj_weight
+            # === Objectness Loss ===
+            # Weighted BCE to handle class imbalance between pos/neg samples
             obj_weights = torch.ones_like(obj_target)
             obj_weights[neg_mask] = self.noobj_weight
 
-            # Compute BCE loss for all samples
             obj_loss_all = self.bce_loss(
                 obj_pred.float(),  # Ensure float32 for stability
                 obj_target
             )
 
-            # Weighted mean - this properly balances pos/neg contributions
-            # The weighting ensures negative samples don't overwhelm positives
-            obj_loss = (obj_loss_all * obj_weights).sum() / (obj_weights.sum() + 1e-6)
-            total_obj_loss += obj_loss
+            # Accumulate weighted obj loss (sum)
+            loss_items['obj_sum'] = loss_items['obj_sum'] + (obj_loss_all * obj_weights).sum()
 
             # Class loss (only for positive samples)
             if num_pos > 0:
-                cls_loss = self.bce_loss(cls_pred[pos_mask], cls_target[pos_mask]).mean()
-                total_cls_loss += cls_loss
+                cls_loss = self.bce_loss(cls_pred[pos_mask], cls_target[pos_mask])
+                loss_items['cls_sum'] = loss_items['cls_sum'] + cls_loss.sum()
 
-        # Average over scales
-        num_scales = len(predictions)
-        if total_num_pos > 0:
-            total_box_loss = total_box_loss / num_scales
-            total_cls_loss = total_cls_loss / num_scales
-        else:
-            # Keep as zero tensor (already initialized)
-            pass
-        total_obj_loss = total_obj_loss / num_scales
+        # === Aggregate Losses ===
+        # Normalize ALL losses by number of positive samples
+        # This ensures consistent loss magnitudes across box, obj, and cls
+        # enabling AutomaticWeightedLoss to work correctly
+        total_pos = max(loss_items['num_pos'], 1)
+        total_box_loss = loss_items['box_sum'] / total_pos
+        total_cls_loss = loss_items['cls_sum'] / total_pos
+        total_obj_loss = loss_items['obj_sum'] / total_pos
 
-        # Weighted sum
+        # Apply static weights
         total_loss = (
             self.box_weight * total_box_loss +
             self.obj_weight * total_obj_loss +
@@ -401,14 +400,17 @@ class DetectionLoss(nn.Module):
 
 class AutomaticWeightedLoss(nn.Module):
     """
-    Automatic loss weighting based on learned task weights.
+    Automatic loss weighting using Normalized Softplus.
 
-    Simplified version of uncertainty weighting that directly learns
-    positive weights for each loss term without the regularization term
-    that can cause negative losses or stagnant weights.
+    Why this instead of Uncertainty (log var)?
+    The Uncertainty method allows weights to explode if one loss is numerically tiny
+    (like obj_loss when averaged over all anchors), leading to negative total loss
+    and ignoring other tasks.
 
-    Uses softplus to ensure weights are always positive, and normalizes
-    the weighted sum to maintain stable loss magnitudes.
+    This implementation:
+    1. Ensures weights are always positive (Softplus).
+    2. Normalizes weights so they sum to N (number of losses).
+    3. Prevents any single task from dominating or disappearing.
     """
 
     def __init__(self, num_losses: int = 3):
@@ -417,9 +419,9 @@ class AutomaticWeightedLoss(nn.Module):
             num_losses: Number of loss terms to weight (default: 3 for box, obj, cls)
         """
         super().__init__()
-        # Initialize raw weights to 0, softplus(0) ≈ 0.693
+        # Initialize parameters to 0, softplus(0) ≈ 0.693
         # params[0]: box, params[1]: obj, params[2]: cls
-        self.raw_weights = nn.Parameter(torch.zeros(num_losses))
+        self.params = nn.Parameter(torch.zeros(num_losses))
 
     def forward(self, box_loss: torch.Tensor, obj_loss: torch.Tensor,
                 cls_loss: torch.Tensor) -> tuple[torch.Tensor, dict]:
@@ -435,24 +437,20 @@ class AutomaticWeightedLoss(nn.Module):
             total_loss: Weighted sum of losses
             weight_dict: Dictionary with current weights for logging
         """
-        # Use softplus to ensure weights are always positive
-        # softplus(x) = log(1 + exp(x))
-        weights = F.softplus(self.raw_weights)
+        losses = torch.stack([box_loss, obj_loss, cls_loss])
 
-        # Normalize weights to sum to num_losses (3) to maintain loss scale
-        weights_normalized = weights / (weights.sum() + 1e-6) * 3.0
+        # Compute weights: Softplus -> Normalize -> Scale to N
+        # w_i = N * softplus(p_i) / sum(softplus(p_j))
+        weights = F.softplus(self.params)
+        weights = weights / (weights.sum() + 1e-6) * 3.0
 
         # Weighted sum
-        total_loss = (
-            weights_normalized[0] * box_loss +
-            weights_normalized[1] * obj_loss +
-            weights_normalized[2] * cls_loss
-        )
+        total_loss = (weights * losses).sum()
 
         weight_dict = {
-            'w_box': weights_normalized[0].item(),
-            'w_obj': weights_normalized[1].item(),
-            'w_cls': weights_normalized[2].item(),
+            'w_box': weights[0].item(),
+            'w_obj': weights[1].item(),
+            'w_cls': weights[2].item(),
         }
 
         return total_loss, weight_dict
@@ -460,11 +458,10 @@ class AutomaticWeightedLoss(nn.Module):
     def get_weights(self) -> dict:
         """Get current effective weights without computing loss."""
         with torch.no_grad():
-            weights = F.softplus(self.raw_weights)
-            weights_normalized = weights / (weights.sum() + 1e-6) * 3.0
-
+            weights = F.softplus(self.params)
+            weights = weights / (weights.sum() + 1e-6) * 3.0
             return {
-                'w_box': weights_normalized[0].item(),
-                'w_obj': weights_normalized[1].item(),
-                'w_cls': weights_normalized[2].item(),
+                'w_box': weights[0].item(),
+                'w_obj': weights[1].item(),
+                'w_cls': weights[2].item(),
             }

@@ -69,12 +69,12 @@ def parse_args():
                         help='LR scheduler: cosine or plateau (default: cosine)')
 
     # ===== Loss weights =====
-    parser.add_argument('--lambda-box', type=float, default=7.5,
-                        help='Box loss weight (default: 7.5)')
+    parser.add_argument('--lambda-box', type=float, default=1.0,
+                        help='Box loss weight (default: 1.0)')
     parser.add_argument('--lambda-obj', type=float, default=1.0,
                         help='Objectness loss weight (default: 1.0)')
-    parser.add_argument('--lambda-cls', type=float, default=0.5,
-                        help='Classification loss weight (default: 0.5)')
+    parser.add_argument('--lambda-cls', type=float, default=1.0,
+                        help='Classification loss weight (default: 1.0)')
     parser.add_argument('--label-smoothing', type=float, default=0.0,
                         help='Label smoothing factor (default: 0.0)')
     parser.add_argument('--auto-loss', action='store_true',
