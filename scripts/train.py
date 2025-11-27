@@ -77,6 +77,8 @@ def parse_args():
                         help='Classification loss weight (default: 0.5)')
     parser.add_argument('--label-smoothing', type=float, default=0.0,
                         help='Label smoothing factor (default: 0.0)')
+    parser.add_argument('--auto-loss', action='store_true',
+                        help='Use automatic loss weighting (learnable uncertainty-based weights)')
 
     # ===== Advanced features =====
     parser.add_argument('--ema', action='store_true',

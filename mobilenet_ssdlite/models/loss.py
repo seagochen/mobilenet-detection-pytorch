@@ -37,12 +37,13 @@ class DetectionLoss(nn.Module):
         self.label_smoothing = label_smoothing
 
         # Loss weights
-        # Updated weights: increase box weight since CIoU values are typically smaller
-        # Increase obj weight to force model to learn background suppression
+        # NOTE: use values from the config as-is to avoid double scaling.
+        # The previous version multiplied user-supplied weights (e.g., lambda_box=7.5)
+        # which unintentionally blew up the box loss and caused noisy training.
         if loss_weights is None:
-            loss_weights = {'box': 0.05, 'obj': 1.0, 'cls': 0.5}
-        self.box_weight = loss_weights.get('box', 0.05) * 3.0  # 0.15 default
-        self.obj_weight = loss_weights.get('obj', 1.0) * 5.0   # 5.0 default
+            loss_weights = {'box': 0.15, 'obj': 1.0, 'cls': 0.5}
+        self.box_weight = loss_weights.get('box', 0.15)
+        self.obj_weight = loss_weights.get('obj', 1.0)
         self.cls_weight = loss_weights.get('cls', 0.5)
 
         # NoObj weight: reduce background loss contribution to prevent
@@ -233,7 +234,14 @@ class DetectionLoss(nn.Module):
             'total_loss': total_loss.float().item()
         }
 
-        return loss_dict, total_loss
+        # Also return tensor losses for auto-weighting (with gradients)
+        loss_tensors = {
+            'box_loss': total_box_loss,
+            'obj_loss': total_obj_loss,
+            'cls_loss': total_cls_loss,
+        }
+
+        return loss_dict, total_loss, loss_tensors
 
     def _assign_targets(self, gt_boxes, gt_labels, anchors, stride, h, w):
         """
@@ -389,3 +397,74 @@ class DetectionLoss(nn.Module):
         # Convert boxes2 from (cx, cy, w, h) to (x1, y1, x2, y2)
         boxes2_xyxy = xywh_to_xyxy(boxes2)
         return box_iou(boxes1, boxes2_xyxy)
+
+
+class AutomaticWeightedLoss(nn.Module):
+    """
+    Automatic loss weighting based on learned task weights.
+
+    Simplified version of uncertainty weighting that directly learns
+    positive weights for each loss term without the regularization term
+    that can cause negative losses or stagnant weights.
+
+    Uses softplus to ensure weights are always positive, and normalizes
+    the weighted sum to maintain stable loss magnitudes.
+    """
+
+    def __init__(self, num_losses: int = 3):
+        """
+        Args:
+            num_losses: Number of loss terms to weight (default: 3 for box, obj, cls)
+        """
+        super().__init__()
+        # Initialize raw weights to 0, softplus(0) ≈ 0.693
+        # params[0]: box, params[1]: obj, params[2]: cls
+        self.raw_weights = nn.Parameter(torch.zeros(num_losses))
+
+    def forward(self, box_loss: torch.Tensor, obj_loss: torch.Tensor,
+                cls_loss: torch.Tensor) -> tuple[torch.Tensor, dict]:
+        """
+        Compute automatically weighted total loss.
+
+        Args:
+            box_loss: Box regression loss (CIoU)
+            obj_loss: Objectness loss (BCE)
+            cls_loss: Classification loss (BCE)
+
+        Returns:
+            total_loss: Weighted sum of losses
+            weight_dict: Dictionary with current weights for logging
+        """
+        # Use softplus to ensure weights are always positive
+        # softplus(x) = log(1 + exp(x))
+        weights = F.softplus(self.raw_weights)
+
+        # Normalize weights to sum to num_losses (3) to maintain loss scale
+        weights_normalized = weights / (weights.sum() + 1e-6) * 3.0
+
+        # Weighted sum
+        total_loss = (
+            weights_normalized[0] * box_loss +
+            weights_normalized[1] * obj_loss +
+            weights_normalized[2] * cls_loss
+        )
+
+        weight_dict = {
+            'w_box': weights_normalized[0].item(),
+            'w_obj': weights_normalized[1].item(),
+            'w_cls': weights_normalized[2].item(),
+        }
+
+        return total_loss, weight_dict
+
+    def get_weights(self) -> dict:
+        """Get current effective weights without computing loss."""
+        with torch.no_grad():
+            weights = F.softplus(self.raw_weights)
+            weights_normalized = weights / (weights.sum() + 1e-6) * 3.0
+
+            return {
+                'w_box': weights_normalized[0].item(),
+                'w_obj': weights_normalized[1].item(),
+                'w_cls': weights_normalized[2].item(),
+            }

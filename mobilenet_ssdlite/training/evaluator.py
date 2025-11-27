@@ -60,7 +60,7 @@ def validate(
 
         # Compute loss
         predictions_raw, anchors = model(images, targets)
-        loss_dict, _ = criterion(predictions_raw, anchors, targets)
+        loss_dict, _, _ = criterion(predictions_raw, anchors, targets)
 
         total_loss += loss_dict['total_loss']
         for k, v in loss_dict.items():

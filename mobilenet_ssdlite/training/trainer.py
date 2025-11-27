@@ -11,7 +11,7 @@ import math
 from typing import Dict, Any, Optional, Tuple, List
 
 from ..models import MobileNetDetector
-from ..models.loss import DetectionLoss
+from ..models.loss import DetectionLoss, AutomaticWeightedLoss
 from ..utils import (
     YOLODataset, collate_fn, get_transforms,
     ReduceLROnPlateau, EarlyStopping, ModelEMA, GradientAccumulator,
@@ -63,6 +63,7 @@ class Trainer:
         self.model = None
         self.optimizer = None
         self.criterion = None
+        self.auto_loss_wrapper = None  # Automatic loss weighting
         self.scheduler = None
         self.lr_plateau = None
         self.scaler = None
@@ -101,7 +102,8 @@ class Trainer:
 
         self.train_loader = DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.workers, collate_fn=collate_fn, pin_memory=True
+            num_workers=args.workers, collate_fn=collate_fn, pin_memory=True,
+            drop_last=True  # Drop incomplete last batch to stabilize BatchNorm
         )
         self.val_loader = DataLoader(
             val_dataset, batch_size=args.batch_size * 2, shuffle=False,
@@ -144,13 +146,6 @@ class Trainer:
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
 
-        # Optimizer
-        self.optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay
-        )
-
         # Loss function
         self.criterion = DetectionLoss(
             config['model']['num_classes'],
@@ -159,6 +154,20 @@ class Trainer:
             config['model']['input_size'],
             config['train']['loss_weights'],
             label_smoothing=args.label_smoothing
+        )
+
+        # Automatic loss weighting (if enabled)
+        params_to_optimize = list(self.model.parameters())
+        if getattr(args, 'auto_loss', False):
+            self.auto_loss_wrapper = AutomaticWeightedLoss(num_losses=3).to(self.device)
+            params_to_optimize += list(self.auto_loss_wrapper.parameters())
+            print(colorstr('bright_cyan', 'Using Automatic Loss Weighting (Uncertainty-based)'))
+
+        # Optimizer (includes auto_loss params if enabled)
+        self.optimizer = optim.AdamW(
+            params_to_optimize,
+            lr=args.lr,
+            weight_decay=args.weight_decay
         )
 
         # Training utilities
@@ -239,6 +248,8 @@ class Trainer:
             self.scaler.load_state_dict(ckpt['scaler'])
         if 'ema' in ckpt and self.ema is not None:
             self.ema.ema.load_state_dict(ckpt['ema'])
+        if 'auto_loss_wrapper' in ckpt and self.auto_loss_wrapper is not None:
+            self.auto_loss_wrapper.load_state_dict(ckpt['auto_loss_wrapper'])
 
         self.start_epoch = ckpt.get('epoch', 0) + 1
         self.best_loss = ckpt.get('best_loss', float('inf'))
@@ -276,7 +287,19 @@ class Trainer:
             # Forward pass (AMP)
             with torch.amp.autocast('cuda', enabled=self.scaler is not None):
                 predictions, anchors = self.model(images, targets)
-                loss_dict, loss = self.criterion(predictions, anchors, targets)
+                loss_dict, loss, loss_tensors = self.criterion(predictions, anchors, targets)
+
+                # Apply automatic loss weighting if enabled
+                if self.auto_loss_wrapper is not None:
+                    # Use tensor losses for proper gradient computation
+                    loss, weight_dict = self.auto_loss_wrapper(
+                        loss_tensors['box_loss'],
+                        loss_tensors['obj_loss'],
+                        loss_tensors['cls_loss']
+                    )
+                    loss_dict['total_loss'] = loss.item()
+                    # Store weights for logging
+                    loss_dict.update(weight_dict)
 
             # Backward pass
             if self.accumulator:
@@ -356,6 +379,8 @@ class Trainer:
             ckpt['scaler'] = self.scaler.state_dict()
         if self.ema is not None:
             ckpt['ema'] = self.ema.ema.state_dict()
+        if self.auto_loss_wrapper is not None:
+            ckpt['auto_loss_wrapper'] = self.auto_loss_wrapper.state_dict()
         torch.save(ckpt, self.weights_dir / 'last.pt')
 
     def train(self) -> None:
@@ -412,6 +437,11 @@ class Trainer:
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {current_val_loss:.4f} (EMA: {self.ema_val_loss:.4f})")
             if compute_metrics and 'mAP@0.5' in val_metrics:
                 print(f"mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
+
+            # Print auto loss weights if enabled
+            if self.auto_loss_wrapper is not None:
+                weights = self.auto_loss_wrapper.get_weights()
+                print(f"Auto weights: box={weights['w_box']:.3f}, obj={weights['w_obj']:.3f}, cls={weights['w_cls']:.3f}")
 
             # Check for best model
             save_best, save_reason = self._check_best_model(val_metrics, compute_metrics)
