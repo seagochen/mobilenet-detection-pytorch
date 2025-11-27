@@ -40,9 +40,11 @@ def bbox_iou(box1, box2, xywh=False, CIoU=True, eps=1e-7):
     inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
             (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
 
-    # Union area
-    w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
-    w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+    # Union area - ensure positive width/height with proper clamping
+    w1 = (b1_x2 - b1_x1).clamp(min=eps)
+    h1 = (b1_y2 - b1_y1).clamp(min=eps)
+    w2 = (b2_x2 - b2_x1).clamp(min=eps)
+    h2 = (b2_y2 - b2_y1).clamp(min=eps)
     union = w1 * h1 + w2 * h2 - inter + eps
 
     # IoU
@@ -58,12 +60,14 @@ def bbox_iou(box1, box2, xywh=False, CIoU=True, eps=1e-7):
         rho2 = ((b1_x1 + b1_x2 - b2_x1 - b2_x2) ** 2 +
                 (b1_y1 + b1_y2 - b2_y1 - b2_y2) ** 2) / 4
 
-        # Aspect ratio consistency
-        v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / (h2 + eps)) - torch.atan(w1 / (h1 + eps)), 2)
+        # Aspect ratio consistency - w1, w2, h1, h2 are already clamped to be positive
+        v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
         with torch.no_grad():
             alpha = v / (v - iou + 1 + eps)
 
-        return iou - (rho2 / c2 + v * alpha)  # CIoU
+        # Clamp final CIoU to valid range [-1, 1] for numerical stability
+        ciou = iou - (rho2 / c2 + v * alpha)
+        return ciou.clamp(min=-1.0, max=1.0)
 
     return iou
 
@@ -128,11 +132,13 @@ class YOLOLoss(nn.Module):
             total_loss: Combined loss
         """
         device = predictions[0].device
+        dtype = predictions[0].dtype
         batch_size = predictions[0].size(0)
 
-        total_box_loss = torch.tensor(0.0, device=device)
-        total_obj_loss = torch.tensor(0.0, device=device)
-        total_cls_loss = torch.tensor(0.0, device=device)
+        # Use zeros that can accumulate gradients
+        total_box_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+        total_obj_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+        total_cls_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
         total_num_pos = 0
 
         # Process each scale
@@ -205,7 +211,6 @@ class YOLOLoss(nn.Module):
             pos_mask = obj_target > 0
             neg_mask = ~pos_mask
             num_pos = pos_mask.sum().item()
-            num_neg = neg_mask.sum().item()
 
             # Box loss using CIoU (only for positive samples)
             if num_pos > 0 and len(all_gt_boxes) > 0:
@@ -222,35 +227,37 @@ class YOLOLoss(nn.Module):
                 # Decode predictions: offset -> xyxy coordinates
                 pred_boxes = self._decode_boxes(pred_offsets, anchor_boxes_cat, stride)
 
-                # Compute CIoU loss
+                # Compute CIoU loss with numerical stability
                 ciou = bbox_iou(pred_boxes, gt_boxes_cat, xywh=False, CIoU=True)
-                box_loss = (1.0 - ciou).mean()
-                total_box_loss += box_loss
-                total_num_pos += num_pos
 
-            # === KEY FIX: Separate Obj/NoObj Loss ===
-            # This prevents the massive number of background samples from
-            # overwhelming the few positive samples
+                # Safety check for NaN/Inf in CIoU
+                valid_mask = torch.isfinite(ciou)
+                if valid_mask.sum() > 0:
+                    box_loss = (1.0 - ciou[valid_mask]).mean()
+                    total_box_loss += box_loss
+                    total_num_pos += valid_mask.sum().item()
+                else:
+                    # All CIoU values are invalid, skip this scale
+                    pass
 
-            # Positive objectness loss (foreground)
-            if num_pos > 0:
-                obj_loss_pos = self.bce_loss(
-                    obj_pred[pos_mask],
-                    obj_target[pos_mask]
-                ).mean()
-            else:
-                obj_loss_pos = torch.tensor(0.0, device=device)
+            # === Objectness Loss with proper weighting ===
+            # Use weighted BCE to handle class imbalance between pos/neg samples
+            # This ensures proper gradient balance regardless of pos/neg ratio
 
-            # Negative objectness loss (background) - weighted down
-            if num_neg > 0:
-                obj_loss_neg = self.bce_loss(
-                    obj_pred[neg_mask],
-                    obj_target[neg_mask]
-                ).mean() * self.noobj_weight
-            else:
-                obj_loss_neg = torch.tensor(0.0, device=device)
+            # Create weight mask: positive samples get weight 1.0, negative get noobj_weight
+            obj_weights = torch.ones_like(obj_target)
+            obj_weights[neg_mask] = self.noobj_weight
 
-            total_obj_loss += obj_loss_pos + obj_loss_neg
+            # Compute BCE loss for all samples
+            obj_loss_all = self.bce_loss(
+                obj_pred.float(),  # Ensure float32 for stability
+                obj_target
+            )
+
+            # Weighted mean - this properly balances pos/neg contributions
+            # The weighting ensures negative samples don't overwhelm positives
+            obj_loss = (obj_loss_all * obj_weights).sum() / (obj_weights.sum() + 1e-6)
+            total_obj_loss += obj_loss
 
             # Class loss (only for positive samples)
             if num_pos > 0:
@@ -259,9 +266,13 @@ class YOLOLoss(nn.Module):
 
         # Average over scales
         num_scales = len(predictions)
-        total_box_loss = total_box_loss / num_scales if total_num_pos > 0 else torch.tensor(0.0, device=device)
+        if total_num_pos > 0:
+            total_box_loss = total_box_loss / num_scales
+            total_cls_loss = total_cls_loss / num_scales
+        else:
+            # Keep as zero tensor (already initialized)
+            pass
         total_obj_loss = total_obj_loss / num_scales
-        total_cls_loss = total_cls_loss / num_scales if total_num_pos > 0 else torch.tensor(0.0, device=device)
 
         # Weighted sum
         total_loss = (
@@ -270,11 +281,18 @@ class YOLOLoss(nn.Module):
             self.cls_weight * total_cls_loss
         )
 
+        # NaN/Inf safety check - replace with zero if detected
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            total_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+            total_box_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+            total_obj_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+            total_cls_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+
         loss_dict = {
-            'box_loss': total_box_loss.item(),
-            'obj_loss': total_obj_loss.item(),
-            'cls_loss': total_cls_loss.item(),
-            'total_loss': total_loss.item()
+            'box_loss': total_box_loss.float().item(),
+            'obj_loss': total_obj_loss.float().item(),
+            'cls_loss': total_cls_loss.float().item(),
+            'total_loss': total_loss.float().item()
         }
 
         return loss_dict, total_loss

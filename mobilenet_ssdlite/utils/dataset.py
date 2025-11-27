@@ -12,6 +12,9 @@ from torch.utils.data import Dataset
 from PIL import Image
 from pathlib import Path
 
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
 
 class DetectionDataset(Dataset):
     """
@@ -30,6 +33,9 @@ class DetectionDataset(Dataset):
         self.data_dir = data_dir
         self.transforms = transforms
         self.img_size = img_size
+        # Keep normalization tensors on CPU; dataloader moves images later
+        self.mean = IMAGENET_MEAN
+        self.std = IMAGENET_STD
 
         # Load annotations
         self.annotations = []
@@ -146,6 +152,7 @@ class DetectionDataset(Dataset):
 
         # Convert to tensor
         image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        image = (image - self.mean) / self.std
 
         target = {
             'boxes': torch.from_numpy(boxes).float() if len(boxes) > 0 else torch.zeros((0, 4)),
@@ -175,6 +182,8 @@ class YOLODataset(Dataset):
         self.transforms = transforms
         self.img_size = img_size
         self.split = split
+        self.mean = IMAGENET_MEAN
+        self.std = IMAGENET_STD
 
         # Load YAML config
         yaml_path = Path(yaml_path).resolve()
@@ -380,6 +389,7 @@ class YOLODataset(Dataset):
 
         # Convert to tensor
         image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        image = (image - self.mean) / self.std
 
         target = {
             'boxes': torch.from_numpy(boxes).float() if len(boxes) > 0 else torch.zeros((0, 4)),

@@ -54,6 +54,7 @@ def get_transforms(config, is_train=True):
     else:
         # Validation: no augmentation
         transforms = A.Compose([
+            A.NoOp()
         ], bbox_params=A.BboxParams(
             format='pascal_voc',
             label_fields=['labels']
