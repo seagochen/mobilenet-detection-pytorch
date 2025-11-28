@@ -83,6 +83,7 @@ class Trainer:
         self.ema_val_loss = None
         self.ema_alpha = 0.3
         self.scheduler_type = 'cosine'
+        self.no_improve_counter = 0  # Counter for epochs without val_loss improvement
 
     def setup_data(self) -> None:
         """Setup datasets and dataloaders."""
@@ -161,7 +162,7 @@ class Trainer:
         # Automatic loss weighting (if enabled)
         params_to_optimize = list(self.model.parameters())
         if getattr(args, 'auto_loss', False):
-            self.auto_loss_wrapper = AutomaticWeightedLoss(num_losses=3).to(self.device)
+            self.auto_loss_wrapper = AutomaticWeightedLoss(num_losses=4).to(self.device)
             params_to_optimize += list(self.auto_loss_wrapper.parameters())
             print(colorstr('bright_cyan', 'Using Automatic Loss Weighting (Uncertainty-based)'))
 
@@ -190,12 +191,14 @@ class Trainer:
         self._setup_scheduler()
 
     def _setup_scheduler(self) -> None:
-        """Setup learning rate scheduler."""
+        """Setup learning rate scheduler based on early_stopping setting."""
         args = self.args
         total_epochs = args.epochs
         warmup_epochs = args.warmup_epochs
+        use_plateau = args.early_stopping > 0
 
-        if args.scheduler == 'cosine':
+        if not use_plateau:
+            # Cosine annealing (default when early stopping is disabled)
             def lr_lambda(epoch):
                 if epoch < warmup_epochs:
                     return (epoch + 1) / warmup_epochs
@@ -206,7 +209,8 @@ class Trainer:
             self.scheduler_type = 'cosine'
             print(colorstr('bright_cyan', f'Using Cosine Annealing scheduler with {warmup_epochs} warmup epochs'))
 
-        else:  # plateau
+        else:
+            # ReduceLROnPlateau (when early stopping is enabled)
             def lr_lambda(epoch):
                 if epoch < warmup_epochs:
                     return (epoch + 1) / warmup_epochs
@@ -257,6 +261,7 @@ class Trainer:
         self.best_loss = ckpt.get('best_loss', float('inf'))
         self.best_mAP = ckpt.get('best_mAP', 0.0)
         self.ema_val_loss = ckpt.get('ema_val_loss', None)
+        self.no_improve_counter = ckpt.get('no_improve_counter', 0)
 
         print(colorstr('bright_green',
             f'Resumed from epoch {self.start_epoch}, best_loss={self.best_loss:.4f}, best_mAP={self.best_mAP:.4f}'))
@@ -294,11 +299,10 @@ class Trainer:
                 # Apply automatic loss weighting if enabled
                 if self.auto_loss_wrapper is not None:
                     # Use tensor losses for proper gradient computation
-                    # Combine obj_pos and obj_neg into single obj for auto-weighting
-                    obj_combined = loss_tensors['obj_pos_loss'] + loss_tensors['obj_neg_loss']
                     loss, weight_dict = self.auto_loss_wrapper(
                         loss_tensors['box_loss'],
-                        obj_combined,
+                        loss_tensors['obj_pos_loss'],
+                        loss_tensors['obj_neg_loss'],
                         loss_tensors['cls_loss']
                     )
                     loss_dict['total_loss'] = loss.item()
@@ -368,6 +372,7 @@ class Trainer:
             'best_loss': self.best_loss,
             'best_mAP': self.best_mAP,
             'ema_val_loss': self.ema_val_loss,
+            'no_improve_counter': self.no_improve_counter,
             'args': vars(self.args)
         }
         if self.lr_plateau is not None:
@@ -439,14 +444,13 @@ class Trainer:
             obj_neg_l = train_components.get('obj_neg_loss', 0)
             cls_l = train_components.get('cls_loss', 0)
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {current_val_loss:.4f} (EMA: {self.ema_val_loss:.4f})")
-            print(f"  box: {box_l:.4f} | obj_pos: {obj_pos_l:.4f} | obj_neg: {obj_neg_l:.4f} | cls: {cls_l:.4f}")
-            if compute_metrics and 'mAP@0.5' in val_metrics:
-                print(f"mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
-
-            # Print auto loss weights if enabled
+            loss_line = f"  box: {box_l:.4f} | obj_pos: {obj_pos_l:.4f} | obj_neg: {obj_neg_l:.4f} | cls: {cls_l:.4f}"
             if self.auto_loss_wrapper is not None:
                 weights = self.auto_loss_wrapper.get_weights()
-                print(f"Auto weights: box={weights['w_box']:.3f}, obj={weights['w_obj']:.3f}, cls={weights['w_cls']:.3f}")
+                loss_line += f"  [w: {weights['w_box']:.2f}, {weights['w_obj_pos']:.2f}, {weights['w_obj_neg']:.2f}, {weights['w_cls']:.2f}]"
+            print(loss_line)
+            if compute_metrics and 'mAP@0.5' in val_metrics:
+                print(f"mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
 
             # Check for best model
             save_best, save_reason = self._check_best_model(val_metrics, compute_metrics)
@@ -454,7 +458,7 @@ class Trainer:
             # Save checkpoints
             self.save_checkpoint(epoch, is_best=save_best, save_reason=save_reason)
 
-            # Early stopping check
+            # Early stopping check (LR reduction based)
             if self.early_stopping and self.lr_plateau is not None:
                 should_stop = self.early_stopping.step(
                     self.ema_val_loss,
@@ -465,6 +469,13 @@ class Trainer:
                     print(colorstr('red', 'bold', '\nEarly stopping triggered!'))
                     break
 
+            # Force stop if val_loss not improving for too long
+            max_no_improve = getattr(args, 'max_no_improve', 15)
+            if self.no_improve_counter >= max_no_improve:
+                print(colorstr('red', 'bold',
+                    f'\nForce stopping: val_loss not improved for {max_no_improve} epochs'))
+                break
+
         self.plotter.plot_training_curves()
         print(f"\nTraining complete. Results saved to {self.save_dir}")
         print(f"Best val_loss (EMA): {self.best_loss:.4f}, Best mAP@0.5: {self.best_mAP:.4f}")
@@ -473,6 +484,7 @@ class Trainer:
         """Check if current model is the best and update tracking."""
         save_best = False
         save_reason = ""
+        loss_improved = False
         current_mAP = val_metrics.get('mAP@0.5', None)
 
         if compute_metrics and current_mAP is not None:
@@ -482,6 +494,7 @@ class Trainer:
                 self.best_mAP = current_mAP
             if self.ema_val_loss < self.best_loss:
                 save_best = True
+                loss_improved = True
                 if save_reason:
                     save_reason += f", val_loss (EMA) improved: {self.best_loss:.4f} -> {self.ema_val_loss:.4f}"
                 else:
@@ -490,7 +503,14 @@ class Trainer:
         else:
             if self.ema_val_loss < self.best_loss:
                 save_best = True
+                loss_improved = True
                 save_reason = f"val_loss (EMA) improved: {self.best_loss:.4f} -> {self.ema_val_loss:.4f}"
                 self.best_loss = self.ema_val_loss
+
+        # Update no-improvement counter
+        if loss_improved:
+            self.no_improve_counter = 0
+        else:
+            self.no_improve_counter += 1
 
         return save_best, save_reason

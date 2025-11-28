@@ -423,44 +423,46 @@ class AutomaticWeightedLoss(nn.Module):
     3. Prevents any single task from dominating or disappearing.
     """
 
-    def __init__(self, num_losses: int = 3):
+    def __init__(self, num_losses: int = 4):
         """
         Args:
-            num_losses: Number of loss terms to weight (default: 3 for box, obj, cls)
+            num_losses: Number of loss terms to weight (default: 4 for box, obj_pos, obj_neg, cls)
         """
         super().__init__()
         # Initialize parameters to 0, softplus(0) ≈ 0.693
-        # params[0]: box, params[1]: obj, params[2]: cls
+        # params[0]: box, params[1]: obj_pos, params[2]: obj_neg, params[3]: cls
         self.params = nn.Parameter(torch.zeros(num_losses))
 
-    def forward(self, box_loss: torch.Tensor, obj_loss: torch.Tensor,
-                cls_loss: torch.Tensor) -> tuple[torch.Tensor, dict]:
+    def forward(self, box_loss: torch.Tensor, obj_pos_loss: torch.Tensor,
+                obj_neg_loss: torch.Tensor, cls_loss: torch.Tensor) -> tuple[torch.Tensor, dict]:
         """
         Compute automatically weighted total loss.
 
         Args:
             box_loss: Box regression loss (CIoU)
-            obj_loss: Objectness loss (BCE)
+            obj_pos_loss: Positive objectness loss (BCE)
+            obj_neg_loss: Negative objectness loss (BCE)
             cls_loss: Classification loss (BCE)
 
         Returns:
             total_loss: Weighted sum of losses
             weight_dict: Dictionary with current weights for logging
         """
-        losses = torch.stack([box_loss, obj_loss, cls_loss])
+        losses = torch.stack([box_loss, obj_pos_loss, obj_neg_loss, cls_loss])
 
         # Compute weights: Softplus -> Normalize -> Scale to N
         # w_i = N * softplus(p_i) / sum(softplus(p_j))
         weights = F.softplus(self.params)
-        weights = weights / (weights.sum() + 1e-6) * 3.0
+        weights = weights / (weights.sum() + 1e-6) * 4.0
 
         # Weighted sum
         total_loss = (weights * losses).sum()
 
         weight_dict = {
             'w_box': weights[0].item(),
-            'w_obj': weights[1].item(),
-            'w_cls': weights[2].item(),
+            'w_obj_pos': weights[1].item(),
+            'w_obj_neg': weights[2].item(),
+            'w_cls': weights[3].item(),
         }
 
         return total_loss, weight_dict
@@ -469,9 +471,10 @@ class AutomaticWeightedLoss(nn.Module):
         """Get current effective weights without computing loss."""
         with torch.no_grad():
             weights = F.softplus(self.params)
-            weights = weights / (weights.sum() + 1e-6) * 3.0
+            weights = weights / (weights.sum() + 1e-6) * 4.0
             return {
                 'w_box': weights[0].item(),
-                'w_obj': weights[1].item(),
-                'w_cls': weights[2].item(),
+                'w_obj_pos': weights[1].item(),
+                'w_obj_neg': weights[2].item(),
+                'w_cls': weights[3].item(),
             }

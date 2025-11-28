@@ -67,15 +67,14 @@ def parse_args():
                         help='Warmup epochs (default: 5)')
     parser.add_argument('--grad-clip', type=float, default=10.0,
                         help='Gradient clipping max norm (default: 10.0)')
-    parser.add_argument('--scheduler', type=str, default='cosine',
-                        choices=['cosine', 'plateau'],
-                        help='LR scheduler: cosine or plateau (default: cosine)')
 
     # ===== Loss weights =====
     parser.add_argument('--lambda-box', type=float, default=1.0,
                         help='Box loss weight (default: 1.0)')
-    parser.add_argument('--lambda-obj', type=float, default=1.0,
-                        help='Objectness loss weight (default: 1.0)')
+    parser.add_argument('--lambda-obj-pos', type=float, default=1.0,
+                        help='Positive objectness loss weight (default: 1.0)')
+    parser.add_argument('--lambda-obj-neg', type=float, default=1.0,
+                        help='Negative objectness loss weight (default: 1.0)')
     parser.add_argument('--lambda-cls', type=float, default=1.0,
                         help='Classification loss weight (default: 1.0)')
     parser.add_argument('--label-smoothing', type=float, default=0.0,
@@ -90,14 +89,16 @@ def parse_args():
                         help='Use Automatic Mixed Precision')
     parser.add_argument('--accumulation-steps', type=int, default=1,
                         help='Gradient accumulation steps (default: 1)')
-    parser.add_argument('--patience', type=int, default=5,
-                        help='Patience for ReduceLROnPlateau')
-    parser.add_argument('--lr-factor', type=float, default=0.1,
-                        help='Factor to reduce learning rate (default: 0.1)')
-    parser.add_argument('--min-lr', type=float, default=1e-6,
-                        help='Minimum learning rate (default: 1e-6)')
     parser.add_argument('--early-stopping', type=int, default=0,
-                        help='Early stopping after N LR reductions (0=disabled)')
+                        help='Enable early stopping after N LR reductions (0=disabled, uses cosine scheduler)')
+    parser.add_argument('--patience', type=int, default=5,
+                        help='Epochs to wait before reducing LR (only with --early-stopping)')
+    parser.add_argument('--lr-factor', type=float, default=0.1,
+                        help='LR reduction factor (only with --early-stopping)')
+    parser.add_argument('--min-lr', type=float, default=1e-6,
+                        help='Minimum learning rate (only with --early-stopping)')
+    parser.add_argument('--max-no-improve', type=int, default=15,
+                        help='Force stop if val_loss not improving for N epochs (default: 15)')
 
     # ===== Evaluation =====
     parser.add_argument('--eval-interval', type=int, default=1,

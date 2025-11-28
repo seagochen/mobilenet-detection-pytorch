@@ -136,7 +136,8 @@ def build_config(args) -> Dict[str, Any]:
             },
             'loss_weights': {
                 'box': args.lambda_box,
-                'obj': args.lambda_obj,
+                'obj_pos': args.lambda_obj_pos,
+                'obj_neg': args.lambda_obj_neg,
                 'cls': args.lambda_cls
             },
             'augmentation': {
