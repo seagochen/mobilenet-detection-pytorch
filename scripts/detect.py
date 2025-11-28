@@ -441,12 +441,7 @@ def main():
     model = MobileNetDetector(config)
 
     # Load weights
-    if 'model' in checkpoint:
-        model.load_state_dict(checkpoint['model'])
-    elif 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        model.load_state_dict(checkpoint)
+    model.load_state_dict(checkpoint['model'])
 
     model = model.to(device)
     model.eval()

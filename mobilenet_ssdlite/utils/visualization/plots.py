@@ -151,65 +151,6 @@ def visualize_detections(
     return vis_image
 
 
-def plot_training_curves_simple(history: Dict, save_path: Optional[str] = None):
-    """
-    Plot training curves (simple standalone function).
-
-    Args:
-        history: Dict with loss history (keys: total_loss, box_loss, obj_loss, cls_loss)
-        save_path: Path to save plot (optional)
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-
-    # Total loss
-    if 'total_loss' in history:
-        axes[0, 0].plot(history['total_loss'], label='Train')
-    if 'val_total_loss' in history:
-        axes[0, 0].plot(history['val_total_loss'], label='Val')
-    axes[0, 0].set_title('Total Loss')
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True)
-
-    # Box loss
-    if 'box_loss' in history:
-        axes[0, 1].plot(history['box_loss'], label='Train')
-    axes[0, 1].set_title('Box Loss')
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('Loss')
-    axes[0, 1].legend()
-    axes[0, 1].grid(True)
-
-    # Objectness loss
-    if 'obj_loss' in history:
-        axes[1, 0].plot(history['obj_loss'], label='Train')
-    axes[1, 0].set_title('Objectness Loss')
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('Loss')
-    axes[1, 0].legend()
-    axes[1, 0].grid(True)
-
-    # Class loss
-    if 'cls_loss' in history:
-        axes[1, 1].plot(history['cls_loss'], label='Train')
-    axes[1, 1].set_title('Classification Loss')
-    axes[1, 1].set_xlabel('Epoch')
-    axes[1, 1].set_ylabel('Loss')
-    axes[1, 1].legend()
-    axes[1, 1].grid(True)
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path)
-    plt.close()
-
-
-# Legacy alias
-_get_color_palette = get_color_palette
-
-
 class TrainingPlotter:
     """
     训练过程可视化器
@@ -416,36 +357,6 @@ class TrainingPlotter:
         print(f'Metrics saved to {save_path}')
 
 
-def _get_color_palette(n_colors: int = 80):
-    """生成颜色调色板，用于区分不同类别"""
-    colors = [
-        (255, 56, 56),    # 红
-        (255, 157, 151),  # 浅红
-        (255, 112, 31),   # 橙
-        (255, 178, 29),   # 黄橙
-        (207, 210, 49),   # 黄绿
-        (72, 249, 10),    # 绿
-        (146, 204, 23),   # 草绿
-        (61, 219, 134),   # 青绿
-        (26, 147, 52),    # 深绿
-        (0, 212, 187),    # 青
-        (44, 153, 168),   # 深青
-        (0, 194, 255),    # 天蓝
-        (52, 69, 147),    # 深蓝
-        (100, 115, 255),  # 蓝紫
-        (0, 24, 236),     # 蓝
-        (132, 56, 255),   # 紫
-        (82, 0, 133),     # 深紫
-        (203, 56, 255),   # 粉紫
-        (255, 149, 200),  # 粉
-        (255, 55, 199),   # 玫红
-    ]
-    # 如果需要更多颜色，循环使用
-    while len(colors) < n_colors:
-        colors = colors + colors
-    return colors[:n_colors]
-
-
 def plot_detection_samples(
     images: List[np.ndarray],
     predictions: List[List[Dict]],
@@ -472,7 +383,7 @@ def plot_detection_samples(
     n_rows = (n_images + n_cols - 1) // n_cols
 
     # 获取颜色调色板
-    colors = _get_color_palette(len(class_names))
+    colors = get_color_palette(len(class_names))
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 5 * n_rows))
     if n_rows == 1:

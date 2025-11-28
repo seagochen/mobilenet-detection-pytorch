@@ -14,11 +14,7 @@ from .image import (
     IMAGENET_MEAN, IMAGENET_STD, get_normalize_params,
     normalize, denormalize, denormalize_to_uint8
 )
-from .path_utils import (
-    resolve_split_path, infer_label_dir,
-    load_yolo_yaml, find_image_files,
-    get_label_path, validate_dataset_structure
-)
+from .path_utils import resolve_split_path, infer_label_dir
 from .anchors import (
     get_or_compute_anchors, compute_anchors_for_dataset, kmeans_anchors,
     save_anchors, load_anchors, load_boxes_from_yolo_dataset, compute_pos_neg_ratio
@@ -34,8 +30,6 @@ __all__ = [
     'normalize', 'denormalize', 'denormalize_to_uint8',
     # Path utilities
     'resolve_split_path', 'infer_label_dir',
-    'load_yolo_yaml', 'find_image_files',
-    'get_label_path', 'validate_dataset_structure',
     # Anchor utilities
     'get_or_compute_anchors', 'compute_anchors_for_dataset', 'kmeans_anchors',
     'save_anchors', 'load_anchors', 'load_boxes_from_yolo_dataset', 'compute_pos_neg_ratio',

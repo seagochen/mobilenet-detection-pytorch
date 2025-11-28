@@ -3,42 +3,8 @@ General utility functions.
 Provides file operations, seeding, and terminal utilities.
 """
 
-import torch
 import numpy as np
-from typing import List, Dict, Tuple
 from pathlib import Path
-
-# Re-export box operations from box_ops for backward compatibility
-from .box_ops import box_iou_single as box_iou, nms as _nms_tensor
-
-
-def nms(
-    detections: List[Dict],
-    iou_threshold: float = 0.5
-) -> List[Dict]:
-    """
-    Non-Maximum Suppression for detection results.
-
-    Args:
-        detections: List of detection dicts with 'class_id', 'confidence', 'bbox'
-        iou_threshold: IoU threshold for suppression
-
-    Returns:
-        filtered: Filtered detection results after NMS
-    """
-    if len(detections) == 0:
-        return []
-
-    # Extract data to tensors
-    boxes = torch.tensor([det['bbox'] for det in detections], dtype=torch.float32)
-    scores = torch.tensor([det['confidence'] for det in detections], dtype=torch.float32)
-    class_ids = torch.tensor([det['class_id'] for det in detections], dtype=torch.int64)
-
-    # Apply NMS using box_ops
-    keep_indices = _nms_tensor(boxes, scores, iou_threshold, class_ids)
-
-    # Rebuild result list
-    return [detections[idx] for idx in keep_indices.numpy()]
 
 
 def check_img_size(img_size: int, stride: int = 32) -> int:
@@ -161,29 +127,3 @@ def colorstr(*args):
     }
 
     return ''.join(colors.get(x, '') for x in args) + f'{string}' + colors['end']
-
-
-if __name__ == '__main__':
-    print("Testing general utilities...")
-
-    # Test NMS
-    detections = [
-        {'class_id': 0, 'confidence': 0.9, 'bbox': (10, 10, 50, 50)},
-        {'class_id': 0, 'confidence': 0.8, 'bbox': (15, 15, 55, 55)},
-        {'class_id': 1, 'confidence': 0.7, 'bbox': (100, 100, 150, 150)},
-    ]
-    filtered = nms(detections, iou_threshold=0.5)
-    print(f"NMS: {len(detections)} -> {len(filtered)} detections")
-
-    # Test IoU
-    iou = box_iou((10, 10, 50, 50), (15, 15, 55, 55))
-    print(f"IoU: {iou:.4f}")
-
-    # Test img_size check
-    size = check_img_size(639, stride=32)
-    print(f"Img size: 639 -> {size}")
-
-    # Test colorstr
-    print(colorstr('blue', 'bold', 'This is a test'))
-
-    print("\n✓ All tests passed!")

@@ -340,42 +340,6 @@ class DetectionLoss(nn.Module):
 
         return assigned_mask, assigned_anchors, assigned_targets, assigned_labels
 
-    def _compute_box_targets(self, gt_boxes, anchors, stride):
-        """
-        Compute box regression targets (offsets from anchors)
-
-        Args:
-            gt_boxes: [N, 4] target boxes (x1, y1, x2, y2)
-            anchors: [N, 4] anchor boxes (cx, cy, w, h)
-            stride: Current feature map stride
-
-        Returns:
-            targets: [N, 4] regression targets (tx, ty, tw, th)
-        """
-        # Convert gt_boxes to center format
-        gt_cx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
-        gt_cy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
-        gt_w = gt_boxes[:, 2] - gt_boxes[:, 0]
-        gt_h = gt_boxes[:, 3] - gt_boxes[:, 1]
-
-        # Get anchor parameters
-        anchor_cx = anchors[:, 0]
-        anchor_cy = anchors[:, 1]
-        anchor_w = anchors[:, 2]
-        anchor_h = anchors[:, 3]
-
-        # Compute targets (inverse of decoding)
-        # tx, ty: normalized offset using current stride
-        tx = (gt_cx - anchor_cx) / stride
-        ty = (gt_cy - anchor_cy) / stride
-
-        # tw, th: log-space scaling
-        tw = torch.log(gt_w / anchor_w + 1e-16)
-        th = torch.log(gt_h / anchor_h + 1e-16)
-
-        targets = torch.stack([tx, ty, tw, th], dim=-1)
-        return targets
-
     def _decode_boxes(self, offsets, anchors, stride):
         """
         Decode box predictions from offsets to xyxy coordinates.

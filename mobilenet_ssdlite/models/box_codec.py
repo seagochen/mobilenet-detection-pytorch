@@ -3,7 +3,6 @@ Unified box encoding/decoding for YOLO-style detection.
 Ensures consistency between training (loss computation) and inference (detection).
 """
 import torch
-from typing import Tuple
 
 
 class YOLOBoxCodec:
@@ -147,46 +146,3 @@ class YOLOBoxCodec:
         th = torch.logit(sigmoid_th)
 
         return torch.stack([tx, ty, tw, th], dim=-1)
-
-
-def decode_predictions(
-    predictions: torch.Tensor,
-    anchors: torch.Tensor,
-    stride: int
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Decode full YOLO predictions including boxes, objectness, and class scores.
-
-    Args:
-        predictions: [B, num_anchors, H, W, num_outputs] raw predictions
-        anchors: [num_anchors, H, W, 4] anchor boxes (cx, cy, w, h)
-        stride: Feature map stride
-
-    Returns:
-        boxes: [B, num_anchors*H*W, 4] decoded boxes (x1, y1, x2, y2)
-        scores: [B, num_anchors*H*W] objectness scores
-        class_probs: [B, num_anchors*H*W, num_classes] class probabilities
-    """
-    batch_size, num_anchors, h, w, num_outputs = predictions.shape
-
-    # Split predictions
-    box_pred = predictions[..., :4]
-    obj_pred = predictions[..., 4:5]
-    cls_pred = predictions[..., 5:]
-
-    # Expand anchors for batch
-    anchors = anchors.unsqueeze(0)  # [1, num_anchors, H, W, 4]
-
-    # Decode boxes
-    boxes = YOLOBoxCodec.decode(box_pred, anchors, stride)
-
-    # Objectness and class scores
-    scores = torch.sigmoid(obj_pred)
-    class_probs = torch.sigmoid(cls_pred)
-
-    # Reshape for output
-    boxes = boxes.view(batch_size, -1, 4)
-    scores = scores.view(batch_size, -1)
-    class_probs = class_probs.view(batch_size, -1, cls_pred.shape[-1])
-
-    return boxes, scores, class_probs

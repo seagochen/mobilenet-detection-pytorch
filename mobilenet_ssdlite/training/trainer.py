@@ -90,13 +90,12 @@ class Trainer:
         args = self.args
         config = self.config
 
-        train_transforms = get_transforms(config, is_train=True)
-        val_transforms = get_transforms(config, is_train=False)
+        transforms = get_transforms()
 
         print(f"\nLoading dataset from: {args.data}")
 
-        train_dataset = YOLODataset(args.data, 'train', train_transforms, args.img_size)
-        val_dataset = YOLODataset(args.data, 'val', val_transforms, args.img_size)
+        train_dataset = YOLODataset(args.data, 'train', transforms, args.img_size)
+        val_dataset = YOLODataset(args.data, 'val', transforms, args.img_size)
 
         config['model']['num_classes'] = train_dataset.num_classes
         self.class_names = train_dataset.class_names

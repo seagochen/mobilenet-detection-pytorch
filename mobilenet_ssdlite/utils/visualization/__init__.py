@@ -13,7 +13,6 @@ from .plots import (
     plot_labels_distribution,
     visualize_detections,
     get_color_palette,
-    plot_training_curves_simple as plot_training_curves,
 )
 
 __all__ = [
@@ -22,5 +21,4 @@ __all__ = [
     'plot_labels_distribution',
     'visualize_detections',
     'get_color_palette',
-    'plot_training_curves',
 ]
