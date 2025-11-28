@@ -126,6 +126,91 @@ def kmeans_anchors(
     return centroids
 
 
+def compute_pos_neg_ratio(
+    yaml_path: str,
+    img_size: int = 640,
+    strides: List[int] = [8, 16, 32],
+    num_anchors_per_scale: int = 3
+) -> float:
+    """
+    计算数据集的正负样本比例，用于确定 noobj_weight
+
+    Args:
+        yaml_path: 数据集 YAML 配置文件路径
+        img_size: 目标图像尺寸
+        strides: 各检测层的步长
+        num_anchors_per_scale: 每个位置的 anchor 数量
+
+    Returns:
+        noobj_weight: 建议的负样本权重
+    """
+    yaml_path = Path(yaml_path).resolve()
+    with open(yaml_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    root = Path(config.get('path', ''))
+    if not root.is_absolute():
+        root = yaml_path.parent / root
+    root = root.resolve()
+
+    split_path = config.get('train')
+    if split_path is None:
+        raise ValueError("Split 'train' not found in YAML config")
+
+    img_dir = resolve_split_path(root, split_path)
+    label_dir = infer_label_dir(img_dir)
+
+    if not label_dir.exists():
+        raise ValueError(f"Label directory does not exist: {label_dir}")
+
+    # 计算总 anchor 数量（每张图）
+    total_anchors_per_image = sum(
+        (img_size // s) ** 2 * num_anchors_per_scale
+        for s in strides
+    )
+
+    # 统计所有图片的 GT 数量
+    total_gt_boxes = 0
+    num_images = 0
+
+    for label_file in label_dir.glob('*.txt'):
+        num_images += 1
+        with open(label_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and len(line.split()) >= 5:
+                    total_gt_boxes += 1
+
+    if num_images == 0:
+        print("Warning: No images found, using default noobj_weight=1.0")
+        return 1.0
+
+    # 估算正样本数（假设每个 GT 匹配约 1-3 个 anchor）
+    avg_gt_per_image = total_gt_boxes / num_images
+    estimated_pos_per_image = avg_gt_per_image * 2  # 假设平均每个GT匹配2个anchor
+
+    # 计算正负样本比例
+    estimated_neg_per_image = total_anchors_per_image - estimated_pos_per_image
+    pos_neg_ratio = estimated_pos_per_image / max(estimated_neg_per_image, 1)
+
+    # 计算建议的 noobj_weight
+    # 目标：让正负样本对 loss 的贡献大致相等
+    # 如果正样本非常少，需要增加负样本的权重来平衡
+    # noobj_weight = sqrt(pos_neg_ratio) 可以让两者贡献更接近
+    # 限制在 [0.5, 2.0] 范围内
+    noobj_weight = np.clip(np.sqrt(pos_neg_ratio) * 2, 0.5, 2.0)
+
+    print(f"\nPos/Neg Sample Analysis:")
+    print(f"  Total images: {num_images}")
+    print(f"  Total GT boxes: {total_gt_boxes}")
+    print(f"  Avg GT per image: {avg_gt_per_image:.1f}")
+    print(f"  Total anchors per image: {total_anchors_per_image:,}")
+    print(f"  Estimated pos/neg ratio: {pos_neg_ratio:.6f} ({pos_neg_ratio*100:.4f}%)")
+    print(f"  Recommended noobj_weight: {noobj_weight:.3f}")
+
+    return float(noobj_weight)
+
+
 def compute_anchors_for_dataset(
     yaml_path: str,
     n_anchors: int = 9,
@@ -143,7 +228,6 @@ def compute_anchors_for_dataset(
 
     Returns:
         anchors: 分配到各检测层的 anchor，格式为 [[[w,h], ...], ...]
-        best_recall: 最佳召回率
     """
     assert n_anchors % n_scales == 0, f"n_anchors ({n_anchors}) must be divisible by n_scales ({n_scales})"
 
@@ -157,15 +241,6 @@ def compute_anchors_for_dataset(
     print(f"Running K-Means clustering for {n_anchors} anchors...")
     anchors = kmeans_anchors(boxes_wh, n_anchors)
 
-    # 计算最佳召回率
-    iou = box_iou_wh(boxes_wh, anchors)
-    best_iou = iou.max(axis=1)
-    best_recall = (best_iou > 0.5).mean()
-
-    print(f"Anchor clustering complete:")
-    print(f"  Best possible recall @ IoU=0.5: {best_recall:.4f}")
-    print(f"  Mean best IoU: {best_iou.mean():.4f}")
-
     # 分配到各检测层（按面积从小到大）
     anchors_per_scale = n_anchors // n_scales
     anchors_by_scale = []
@@ -177,7 +252,7 @@ def compute_anchors_for_dataset(
         # 转换为整数列表
         anchors_by_scale.append([[int(round(w)), int(round(h))] for w, h in scale_anchors])
 
-    return anchors_by_scale, best_recall
+    return anchors_by_scale
 
 
 def save_anchors(anchors: List[List[List[int]]], save_path: str, metadata: dict = None):
@@ -255,7 +330,7 @@ def get_or_compute_anchors(
 
     # 计算新的 anchor
     print("Computing optimal anchors for dataset...")
-    anchors, best_recall = compute_anchors_for_dataset(
+    anchors = compute_anchors_for_dataset(
         yaml_path=yaml_path,
         n_anchors=n_anchors,
         img_size=img_size
@@ -264,8 +339,7 @@ def get_or_compute_anchors(
     # 保存配置
     metadata = {
         'dataset': yaml_path,
-        'img_size': img_size,
-        'best_recall': float(best_recall)
+        'img_size': img_size
     }
     save_anchors(anchors, str(anchor_file), metadata)
 
@@ -284,7 +358,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    anchors, recall = compute_anchors_for_dataset(
+    anchors = compute_anchors_for_dataset(
         args.data,
         args.n_anchors,
         args.img_size
@@ -295,6 +369,5 @@ if __name__ == '__main__':
 
     save_anchors(anchors, args.output, {
         'dataset': args.data,
-        'img_size': args.img_size,
-        'best_recall': float(recall)
+        'img_size': args.img_size
     })

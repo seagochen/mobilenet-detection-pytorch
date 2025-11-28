@@ -121,6 +121,7 @@ def build_config(args) -> Dict[str, Any]:
             'num_classes': 80,  # Will be overridden by dataset
             'input_size': [args.img_size, args.img_size],
             'fpn_channels': args.fpn_channels,
+            'neck': args.neck,
             'num_anchors': 3
         },
         'anchors': DEFAULT_ANCHORS,

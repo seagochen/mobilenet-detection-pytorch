@@ -21,7 +21,7 @@ from .path_utils import (
 )
 from .anchors import (
     get_or_compute_anchors, compute_anchors_for_dataset, kmeans_anchors,
-    save_anchors, load_anchors, load_boxes_from_yolo_dataset
+    save_anchors, load_anchors, load_boxes_from_yolo_dataset, compute_pos_neg_ratio
 )
 
 __all__ = [
@@ -38,5 +38,5 @@ __all__ = [
     'get_label_path', 'validate_dataset_structure',
     # Anchor utilities
     'get_or_compute_anchors', 'compute_anchors_for_dataset', 'kmeans_anchors',
-    'save_anchors', 'load_anchors', 'load_boxes_from_yolo_dataset',
+    'save_anchors', 'load_anchors', 'load_boxes_from_yolo_dataset', 'compute_pos_neg_ratio',
 ]

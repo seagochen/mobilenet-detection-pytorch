@@ -246,6 +246,12 @@ class TrainingPlotter:
         """
         self.history['epoch'].append(epoch)
 
+        # 动态添加新的 metrics keys
+        for key in metrics.keys():
+            if key not in self.history:
+                # 用 None 填充之前的 epochs
+                self.history[key] = [None] * (len(self.history['epoch']) - 1)
+
         for key in self.history.keys():
             if key != 'epoch':
                 # 如果metrics中有该键则使用其值，否则用None填充，保证长度一致

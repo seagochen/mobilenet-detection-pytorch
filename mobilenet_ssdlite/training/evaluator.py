@@ -89,7 +89,6 @@ def validate(
     # Average losses
     num_batches = len(dataloader)
     metrics = {'val_loss': total_loss / num_batches}
-    metrics.update({k: v / num_batches for k, v in loss_components.items()})
 
     # Compute mAP
     if compute_metrics:

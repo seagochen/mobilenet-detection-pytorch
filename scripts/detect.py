@@ -374,6 +374,7 @@ def load_config_from_checkpoint(checkpoint: dict, checkpoint_path: Path) -> dict
             'num_classes': num_classes,
             'input_size': [ckpt_args.get('img_size', 640), ckpt_args.get('img_size', 640)],
             'fpn_channels': ckpt_args.get('fpn_channels', 128),
+            'neck': ckpt_args.get('neck', 'fpn'),
             'num_anchors': 3
         },
         'anchors': anchors,

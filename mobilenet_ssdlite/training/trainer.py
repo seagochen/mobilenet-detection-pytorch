@@ -155,6 +155,8 @@ class Trainer:
             config['train']['loss_weights'],
             label_smoothing=args.label_smoothing
         )
+        print(f"Loss weights: w_box={self.criterion.w_box}, w_obj_pos={self.criterion.w_obj_pos}, "
+              f"w_obj_neg={self.criterion.w_obj_neg}, w_cls={self.criterion.w_cls}")
 
         # Automatic loss weighting (if enabled)
         params_to_optimize = list(self.model.parameters())
@@ -292,9 +294,11 @@ class Trainer:
                 # Apply automatic loss weighting if enabled
                 if self.auto_loss_wrapper is not None:
                     # Use tensor losses for proper gradient computation
+                    # Combine obj_pos and obj_neg into single obj for auto-weighting
+                    obj_combined = loss_tensors['obj_pos_loss'] + loss_tensors['obj_neg_loss']
                     loss, weight_dict = self.auto_loss_wrapper(
                         loss_tensors['box_loss'],
-                        loss_tensors['obj_loss'],
+                        obj_combined,
                         loss_tensors['cls_loss']
                     )
                     loss_dict['total_loss'] = loss.item()
@@ -332,13 +336,6 @@ class Trainer:
             total_loss += loss_dict['total_loss']
             for k, v in loss_dict.items():
                 loss_components[k] = loss_components.get(k, 0) + v
-
-            pbar.set_postfix({
-                'loss': f"{loss_dict['total_loss']:.4f}",
-                'box': f"{loss_dict['box_loss']:.4f}",
-                'obj': f"{loss_dict['obj_loss']:.4f}",
-                'cls': f"{loss_dict['cls_loss']:.4f}"
-            })
 
         # Average losses
         num_batches = len(self.train_loader)
@@ -422,8 +419,11 @@ class Trainer:
                 else:
                     lr_reduced = self.lr_plateau.step(current_val_loss)
 
-            # Record metrics
-            metrics_all = {'train_loss': train_loss, **val_metrics}
+            # Record metrics (include loss components with 'train_' prefix, exclude total_loss as it duplicates train_loss)
+            loss_components_prefixed = {
+                f'train_{k}': v for k, v in train_components.items() if k != 'total_loss'
+            }
+            metrics_all = {'train_loss': train_loss, **loss_components_prefixed, **val_metrics}
             self.plotter.update(epoch, metrics_all)
             self.plotter.save_metrics_csv()
 
@@ -434,7 +434,12 @@ class Trainer:
                 self.ema_val_loss = self.ema_alpha * current_val_loss + (1 - self.ema_alpha) * self.ema_val_loss
 
             # Print results
+            box_l = train_components.get('box_loss', 0)
+            obj_pos_l = train_components.get('obj_pos_loss', 0)
+            obj_neg_l = train_components.get('obj_neg_loss', 0)
+            cls_l = train_components.get('cls_loss', 0)
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {current_val_loss:.4f} (EMA: {self.ema_val_loss:.4f})")
+            print(f"  box: {box_l:.4f} | obj_pos: {obj_pos_l:.4f} | obj_neg: {obj_neg_l:.4f} | cls: {cls_l:.4f}")
             if compute_metrics and 'mAP@0.5' in val_metrics:
                 print(f"mAP@0.5: {val_metrics['mAP@0.5']:.4f} | P: {val_metrics['precision']:.4f} | R: {val_metrics['recall']:.4f}")
 

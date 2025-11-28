@@ -18,14 +18,15 @@ class DetectionLoss(nn.Module):
     Key fix: Separate obj/noobj loss to prevent background overwhelming foreground.
     """
 
-    def __init__(self, num_classes, anchors, strides, input_size, loss_weights=None, label_smoothing=0.0):
+    def __init__(self, num_classes, anchors, strides, input_size, loss_weights=None,
+                 label_smoothing=0.0):
         """
         Args:
             num_classes: Number of object classes
             anchors: Anchor generator
             strides: Feature map strides [8, 16, 32]
             input_size: Input image size [H, W]
-            loss_weights: Dict with 'box', 'obj', 'cls' weights
+            loss_weights: Dict with 'box', 'obj_pos', 'obj_neg', 'cls' weights
             label_smoothing: Label smoothing factor (0.0 = no smoothing, typical: 0.05-0.1)
         """
         super().__init__()
@@ -36,18 +37,15 @@ class DetectionLoss(nn.Module):
         self.input_size = input_size
         self.label_smoothing = label_smoothing
 
-        # Loss weights
-        # With all losses normalized by num_pos, they have similar magnitudes
-        # so balanced weights (1.0, 1.0, 1.0) work well
+        # Four-component loss weights:
+        # total_loss = w_box * box + w_obj_pos * obj_pos + w_obj_neg * obj_neg + w_cls * cls
+        # All losses are normalized (mean per sample), so weights are directly comparable
         if loss_weights is None:
-            loss_weights = {'box': 1.0, 'obj': 1.0, 'cls': 1.0}
-        self.box_weight = loss_weights.get('box', 1.0)
-        self.obj_weight = loss_weights.get('obj', 1.0)
-        self.cls_weight = loss_weights.get('cls', 1.0)
-
-        # NoObj weight: reduce background loss contribution to prevent
-        # the massive number of negative samples from dominating training
-        self.noobj_weight = 0.5
+            loss_weights = {}
+        self.w_box = loss_weights.get('box', 1.0)
+        self.w_obj_pos = loss_weights.get('obj_pos', 1.0)
+        self.w_obj_neg = loss_weights.get('obj_neg', 1.0)
+        self.w_cls = loss_weights.get('cls', 1.0)
 
         # Loss functions
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
@@ -77,11 +75,11 @@ class DetectionLoss(nn.Module):
         # This allows proper normalization at the end
         loss_items = {
             'box_sum': torch.zeros(1, device=device, dtype=dtype).squeeze(),
-            'obj_sum': torch.zeros(1, device=device, dtype=dtype).squeeze(),
             'cls_sum': torch.zeros(1, device=device, dtype=dtype).squeeze(),
             'num_pos': 0,
             'num_anchors': 0,
         }
+        # obj_pos_sum and obj_neg_sum will be added dynamically
 
         # Process each scale
         for scale_idx, (pred, anchor_boxes, stride) in enumerate(
@@ -186,17 +184,22 @@ class DetectionLoss(nn.Module):
                 loss_items['box_sum'] = loss_items['box_sum'] + (1.0 - ciou).sum()
 
             # === Objectness Loss ===
-            # Weighted BCE to handle class imbalance between pos/neg samples
-            obj_weights = torch.ones_like(obj_target)
-            obj_weights[neg_mask] = self.noobj_weight
-
+            # Separate positive and negative objectness loss for better balance
+            # This prevents the massive number of negative samples from dominating
             obj_loss_all = self.bce_loss(
                 obj_pred.float(),  # Ensure float32 for stability
                 obj_target
             )
 
-            # Accumulate weighted obj loss (sum)
-            loss_items['obj_sum'] = loss_items['obj_sum'] + (obj_loss_all * obj_weights).sum()
+            # Positive samples: sum their loss (will be normalized by num_pos later)
+            if num_pos > 0:
+                loss_items['obj_pos_sum'] = loss_items.get('obj_pos_sum', torch.tensor(0.0, device=device)) + obj_loss_all[pos_mask].sum()
+
+            # Negative samples: compute mean per scale (will be averaged across scales later)
+            num_neg = neg_mask.sum().item()
+            if num_neg > 0:
+                noobj_loss_mean = obj_loss_all[neg_mask].mean()
+                loss_items['obj_neg_sum'] = loss_items.get('obj_neg_sum', torch.tensor(0.0, device=device)) + noobj_loss_mean
 
             # Class loss (only for positive samples)
             if num_pos > 0:
@@ -204,40 +207,47 @@ class DetectionLoss(nn.Module):
                 loss_items['cls_sum'] = loss_items['cls_sum'] + cls_loss.sum()
 
         # === Aggregate Losses ===
-        # Normalize ALL losses by number of positive samples
-        # This ensures consistent loss magnitudes across box, obj, and cls
-        # enabling AutomaticWeightedLoss to work correctly
+        # Simple and intuitive four-component loss:
+        # total_loss = w_box * box + w_obj_pos * obj_pos + w_obj_neg * obj_neg + w_cls * cls
         total_pos = max(loss_items['num_pos'], 1)
-        total_box_loss = loss_items['box_sum'] / total_pos
-        total_cls_loss = loss_items['cls_sum'] / total_pos
-        total_obj_loss = loss_items['obj_sum'] / total_pos
+        num_scales = len(predictions)
 
-        # Apply static weights
+        # Each loss is normalized to be a "mean loss per sample"
+        box_loss = loss_items['box_sum'] / total_pos           # mean box loss per positive sample
+        obj_pos_loss = loss_items.get('obj_pos_sum', torch.tensor(0.0, device=device)) / total_pos  # mean obj loss per positive
+        obj_neg_loss = loss_items.get('obj_neg_sum', torch.tensor(0.0, device=device)) / num_scales  # mean obj loss per scale (already mean per neg)
+        cls_loss = loss_items['cls_sum'] / total_pos           # mean cls loss per positive sample
+
+        # Four-component weighted sum
         total_loss = (
-            self.box_weight * total_box_loss +
-            self.obj_weight * total_obj_loss +
-            self.cls_weight * total_cls_loss
+            self.w_box * box_loss +
+            self.w_obj_pos * obj_pos_loss +
+            self.w_obj_neg * obj_neg_loss +
+            self.w_cls * cls_loss
         )
 
         # NaN/Inf safety check - replace with zero if detected
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             total_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
-            total_box_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
-            total_obj_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
-            total_cls_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+            box_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+            obj_pos_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+            obj_neg_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
+            cls_loss = torch.zeros(1, device=device, dtype=dtype).squeeze()
 
         loss_dict = {
-            'box_loss': total_box_loss.float().item(),
-            'obj_loss': total_obj_loss.float().item(),
-            'cls_loss': total_cls_loss.float().item(),
+            'box_loss': box_loss.float().item(),
+            'obj_pos_loss': obj_pos_loss.float().item(),
+            'obj_neg_loss': obj_neg_loss.float().item(),
+            'cls_loss': cls_loss.float().item(),
             'total_loss': total_loss.float().item()
         }
 
         # Also return tensor losses for auto-weighting (with gradients)
         loss_tensors = {
-            'box_loss': total_box_loss,
-            'obj_loss': total_obj_loss,
-            'cls_loss': total_cls_loss,
+            'box_loss': box_loss,
+            'obj_pos_loss': obj_pos_loss,
+            'obj_neg_loss': obj_neg_loss,
+            'cls_loss': cls_loss,
         }
 
         return loss_dict, total_loss, loss_tensors

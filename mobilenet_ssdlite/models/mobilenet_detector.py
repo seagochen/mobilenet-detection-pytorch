@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torchvision
 
-from .backbone import MobileNetBackbone, FeaturePyramidNetwork
+from .backbone import MobileNetBackbone, build_neck
 from .detection_head import DetectionHead, AnchorGenerator, YOLODecoder
 
 
@@ -36,12 +36,15 @@ class MobileNetDetector(nn.Module):
         # Get backbone output channels
         backbone_channels = self.backbone.feature_info
 
-        # Feature Pyramid Network
+        # Neck: FPN or PANet
         fpn_channels = config['model']['fpn_channels']
-        self.fpn = FeaturePyramidNetwork(
+        neck_type = config['model'].get('neck', 'fpn')  # Default to FPN for backward compatibility
+        self.neck = build_neck(
+            neck_type=neck_type,
             in_channels_list=backbone_channels,
             out_channels=fpn_channels
         )
+        print(f"Using {neck_type.upper()} neck")
 
         # Detection heads for each scale
         self.detection_heads = nn.ModuleList([
@@ -93,7 +96,7 @@ class MobileNetDetector(nn.Module):
         features = self.backbone(x)
 
         # Apply FPN
-        fpn_features = self.fpn(features)
+        fpn_features = self.neck(features)
 
         # Apply detection heads
         predictions = []

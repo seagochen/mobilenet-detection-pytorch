@@ -49,7 +49,10 @@ def parse_args():
 
     # ===== Model =====
     parser.add_argument('--fpn-channels', type=int, default=128,
-                        help='FPN output channels (default: 128)')
+                        help='FPN/PANet output channels (default: 128)')
+    parser.add_argument('--neck', type=str, default='fpn',
+                        choices=['fpn', 'panet'],
+                        help='Neck type: fpn or panet (default: fpn)')
     parser.add_argument('--no-pretrained', action='store_true',
                         help='Do not use pretrained backbone weights')
 
