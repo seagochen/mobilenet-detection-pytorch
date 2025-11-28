@@ -59,8 +59,8 @@ def parse_args():
     # ===== Training =====
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs (default: 100)')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='Initial learning rate (default: 0.001)')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='Initial learning rate (default: 0.0001)')
     parser.add_argument('--weight-decay', type=float, default=5e-5,
                         help='Weight decay (default: 0.00005)')
     parser.add_argument('--warmup-epochs', type=int, default=5,

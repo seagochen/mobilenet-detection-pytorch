@@ -27,8 +27,6 @@ def parse_args():
                         help='Path to checkpoint file, or experiment name (e.g., "exp", "exp_1")')
     parser.add_argument('--source', type=str, required=True,
                         help='Path to image, folder, or video')
-    parser.add_argument('--output', type=str, default='output',
-                        help='Output directory')
     parser.add_argument('--conf-thresh', type=float, default=0.25,
                         help='Confidence threshold')
     parser.add_argument('--nms-thresh', type=float, default=0.45,
@@ -46,6 +44,33 @@ def parse_args():
     parser.add_argument('--project', type=str, default='runs/train',
                         help='Project directory for experiment lookup (default: runs/train)')
     return parser.parse_args()
+
+
+def get_exp_name(checkpoint: str, project: str) -> str:
+    """
+    Extract experiment name from checkpoint path or name.
+
+    Args:
+        checkpoint: Checkpoint path or experiment name
+        project: Project directory
+
+    Returns:
+        Experiment name (e.g., 'exp', 'exp_1', 'resnet18_normal')
+    """
+    checkpoint_path = Path(checkpoint)
+
+    # If it's a file path, extract from parent directories
+    if checkpoint_path.exists() and checkpoint_path.is_file():
+        # e.g., runs/train/exp/weights/best.pt -> exp
+        return checkpoint_path.parent.parent.name
+
+    # If it's an experiment name under project directory
+    exp_dir = Path(project) / checkpoint
+    if exp_dir.exists():
+        return checkpoint
+
+    # Otherwise use the checkpoint string as-is
+    return checkpoint
 
 
 def resolve_checkpoint_path(checkpoint: str, project: str, weights: str) -> Path:
@@ -427,8 +452,11 @@ def main():
     model.eval()
     print("Model loaded successfully!")
 
-    # Create output directory
-    os.makedirs(args.output, exist_ok=True)
+    # Determine output directory from experiment name
+    exp_name = get_exp_name(args.checkpoint, args.project)
+    output_dir = Path('runs/eval') / exp_name
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Output directory: {output_dir}")
 
     # Check source type
     source = args.source
@@ -443,18 +471,15 @@ def main():
             vis_image, detections = detect_image(model, source, config, args)
 
             # Save visualization
-            output_path = os.path.join(
-                args.output,
-                os.path.basename(source)
-            )
-            cv2.imwrite(output_path, vis_image)
+            output_path = output_dir / os.path.basename(source)
+            cv2.imwrite(str(output_path), vis_image)
             print(f"Saved result to: {output_path}")
 
             # Save txt if requested
             if args.save_txt:
-                txt_path = os.path.splitext(output_path)[0] + '.txt'
+                txt_path = output_path.with_suffix('.txt')
                 image = cv2.imread(source)
-                save_detections_txt(detections, txt_path, image.shape[:2])
+                save_detections_txt(detections, str(txt_path), image.shape[:2])
                 print(f"Saved detections to: {txt_path}")
 
             # Print detection results
@@ -469,11 +494,8 @@ def main():
 
         elif ext in ['.mp4', '.avi', '.mov']:
             # Video
-            output_path = os.path.join(
-                args.output,
-                os.path.basename(source)
-            )
-            detect_video(model, source, config, args, output_path)
+            output_path = output_dir / os.path.basename(source)
+            detect_video(model, source, config, args, str(output_path))
 
     elif os.path.isdir(source):
         # Directory of images
@@ -492,16 +514,16 @@ def main():
             vis_image, detections = detect_image(model, image_path, config, args)
 
             # Save visualization
-            output_path = os.path.join(args.output, image_file)
-            cv2.imwrite(output_path, vis_image)
+            output_path = output_dir / image_file
+            cv2.imwrite(str(output_path), vis_image)
 
             # Save txt if requested
             if args.save_txt:
-                txt_path = os.path.splitext(output_path)[0] + '.txt'
+                txt_path = output_path.with_suffix('.txt')
                 image = cv2.imread(image_path)
-                save_detections_txt(detections, txt_path, image.shape[:2])
+                save_detections_txt(detections, str(txt_path), image.shape[:2])
 
-        print(f"Saved results to: {args.output}")
+        print(f"Saved results to: {output_dir}")
 
     else:
         print(f"Error: Source not found: {source}")

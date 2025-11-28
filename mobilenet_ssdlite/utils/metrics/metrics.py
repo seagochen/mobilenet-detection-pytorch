@@ -342,11 +342,6 @@ class DetectionMetrics:
             'f1': f1.mean()
         }
 
-        # 每个类别的AP
-        for i in range(self.nc):
-            if i < len(ap50):
-                metrics[f'AP_class_{i}'] = ap50[i]
-
         return metrics
 
     def reset(self):
