@@ -99,7 +99,7 @@ def parse_args():
     # ===== Evaluation =====
     parser.add_argument('--eval-interval', type=int, default=1,
                         help='Evaluate every N epochs (default: 1)')
-    parser.add_argument('--conf-thres', type=float, default=0.001,
+    parser.add_argument('--conf-thres', type=float, default=0.01,
                         help='Confidence threshold for evaluation')
     parser.add_argument('--iou-thres', type=float, default=0.6,
                         help='IoU threshold for NMS')

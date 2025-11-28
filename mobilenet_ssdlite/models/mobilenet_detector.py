@@ -120,14 +120,17 @@ class MobileNetDetector(nn.Module):
 
         return boxes, scores, class_probs
 
-    def predict(self, x, conf_thresh=0.25, nms_thresh=0.45):
+    def predict(self, x, conf_thresh=0.25, nms_thresh=0.45, cross_class_nms=0.0):
         """
         Make predictions with NMS post-processing (Optimized with torchvision.ops.nms)
 
         Args:
             x: Input images [B, 3, H, W]
             conf_thresh: Confidence threshold
-            nms_thresh: NMS IoU threshold
+            nms_thresh: NMS IoU threshold (for same-class suppression)
+            cross_class_nms: Cross-class NMS threshold. If > 0, applies additional
+                            class-agnostic NMS to remove overlapping boxes of different
+                            classes. Recommended value: 0.7-0.9. Set to 0 to disable.
 
         Returns:
             detections: List of detections for each image
@@ -165,7 +168,7 @@ class MobileNetDetector(nn.Module):
                 img_scores = max_scores[i][mask]  # [M]
                 img_labels = labels[i][mask]     # [M]
 
-                # 4. 类别隔离 NMS (Class-agnostic NMS with offsets)
+                # 4. 类别隔离 NMS (Class-aware NMS with offsets)
                 # 为避免不同类别的框相互抑制，给坐标加一个基于类别的偏移量
                 max_coordinate = img_boxes.max() + 5000
                 offsets = img_labels.float() * max_coordinate
@@ -174,10 +177,22 @@ class MobileNetDetector(nn.Module):
                 # 5. 使用 torchvision 极速 NMS
                 keep = torchvision.ops.nms(boxes_for_nms, img_scores, nms_thresh)
 
+                img_boxes = img_boxes[keep]
+                img_scores = img_scores[keep]
+                img_labels = img_labels[keep]
+
+                # 6. 可选的跨类别 NMS：移除高度重叠但类别不同的框
+                # 当同一物体被预测为多个类别时，只保留置信度最高的
+                if cross_class_nms > 0 and len(img_boxes) > 1:
+                    keep2 = torchvision.ops.nms(img_boxes, img_scores, cross_class_nms)
+                    img_boxes = img_boxes[keep2]
+                    img_scores = img_scores[keep2]
+                    img_labels = img_labels[keep2]
+
                 batch_detections.append({
-                    'boxes': img_boxes[keep],
-                    'scores': img_scores[keep],
-                    'labels': img_labels[keep]
+                    'boxes': img_boxes,
+                    'scores': img_scores,
+                    'labels': img_labels
                 })
 
             return batch_detections
