@@ -452,18 +452,20 @@ def plot_detection_samples(
     targets: List[np.ndarray],
     class_names: List[str],
     save_dir: Path,
-    max_images: int = 16
+    max_images: int = 16,
+    conf_thresh: float = 0.25
 ):
     """
     绘制检测样本（类似YOLOv8的val_batch图）
 
     Args:
         images: 图像列表
-        predictions: 预测结果列表
+        predictions: 预测结果列表（会按conf_thresh过滤）
         targets: 目标列表
         class_names: 类别名称
         save_dir: 保存目录
         max_images: 最大显示图像数
+        conf_thresh: 置信度阈值，低于此值的预测不绘制 (default: 0.25)
     """
     n_images = min(len(images), max_images)
     n_cols = 4
@@ -526,11 +528,14 @@ def plot_detection_samples(
                 cv2.putText(img, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX,
                            0.5, (255, 255, 255), 1)
 
-        # 绘制预测（实线框，按类别着色）
+        # 绘制预测（实线框，按类别着色，过滤低置信度）
         if idx < len(predictions):
             for pred in predictions[idx]:
-                cls_id = pred['class_id']
                 conf = pred['confidence']
+                if conf < conf_thresh:
+                    continue
+
+                cls_id = pred['class_id']
                 x1, y1, x2, y2 = map(int, pred['bbox'])
 
                 color = colors[cls_id % len(colors)]
