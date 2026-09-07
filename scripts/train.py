@@ -25,6 +25,7 @@ from mobilenet_ssdlite.training import (
     Trainer,
 )
 from mobilenet_ssdlite.utils import init_seeds, colorstr, increment_path
+from mobilenet_ssdlite.runtime import command
 
 
 def parse_args():
@@ -131,6 +132,7 @@ def parse_args():
     return parser.parse_args()
 
 
+@command("train")
 def main():
     """Main training entry point."""
     args = parse_args()
@@ -193,4 +195,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
